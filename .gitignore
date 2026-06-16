@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# 虚拟环境
+.venv/
+
+# 环境变量（含敏感信息）
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# WorkBuddy 项目数据
+.workbuddy/
+
+# Qoder IDE
+.qoder/
+
+# uv
+uv.lock
+
+# 内部规划文档（不公开）
+docs/planning/
+
+# AgentForge 运行时数据（记忆、会话）
+.agentforge/
+
+# 内部审查记录（不公开）
+code-review*.md
+
+# 浏览器截图（调试产物）
+*.png
+*.jpg
+*.jpeg
+
+# Benchmark 生成的报告（不跟踪）
+benchmark/reports/latest/
