@@ -78,7 +78,7 @@ graph LR
 | **消息总线** | Pub/Sub 发布-订阅，Agent 间解耦通信 | 多维路由（intent/role/wildcard）, 拦截器链 |
 | **编排引擎** | Plan-and-Execute + 审查回退的混合模式 | 条件边, 状态机, LLM 任务拆解 |
 | **分层记忆** | 短期（滑动窗口+摘要压缩）+ 长期（JSON 持久化）+ 会话管理 | 自动保存/加载 |
-| **工具系统** | 三级权限模型（READ/WRITE/EXECUTE）+ 审批门 + 沙箱 | @tool 装饰器, Function Calling |
+| **工具系统** | 三级权限模型（READ/WRITE/EXECUTE）+ 审批门 + 沙箱 + MCP 生态 | @tool 装饰器, Function Calling, MCP |
 | **可观测性** | BusCollector 事件采集 + Streamlit 4-Tab Dashboard | 线程安全, 实时刷新 |
 | **量化评测** | 20 个标准任务, 5 种评判类型, 自动对比报告 | 隔离执行, 3 次取中位数 |
 
@@ -127,7 +127,8 @@ agent_forge/                  # 核心库
 │   ├── registry.py           #   ToolRegistry（三级权限 + 审批门）
 │   ├── file_tools.py         #   read_file / write_file
 │   ├── shell_tools.py        #   run_shell（黑名单 + 沙箱 + 超时）
-│   └── search_tools.py       #   grep_search
+│   ├── search_tools.py       #   grep_search
+│   ├── mcp_tools.py          #   MCP 工具生态接入（可选 [mcp] extra）
 ├── dashboard/                # 可视化
 │   ├── collector.py          #   BusCollector（线程安全事件采集）
 │   └── app.py                #   Streamlit 4-Tab Dashboard
@@ -160,7 +161,11 @@ docs/                         # 模块文档 + ADR + 学习笔记
 ## 测试
 
 ```bash
-# 快速测试（无 LLM 调用，~2 秒）
+# 可选：启用 MCP 工具生态
+uv pip install -e ".[mcp]"
+python demos/phase6_mcp_demo.py --step 1
+
+# 快速测试（无 LLM 调用，~4 秒）
 pytest tests/ -m "not slow" -v
 
 # 全量测试（含真实 API 调用）
@@ -176,7 +181,7 @@ ruff check agent_forge/ tests/ benchmark/ demos/
 |------|------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 整体架构设计 |
 | [docs/modules/](docs/modules/) | 各模块设计文档 |
-| [docs/adr/](docs/adr/) | 架构决策记录（ADR） |
+| [docs/adr/](docs/adr/) | 架构决策记录（ADR，含 MCP 接入决策） |
 | [docs/learning-notes/](docs/learning-notes/) | 分阶段学习笔记 |
 
 ## License

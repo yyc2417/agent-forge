@@ -23,7 +23,8 @@ agent_forge/
 │   ├── file_tools.py     # read_file / write_file
 │   ├── shell_tools.py    # run_shell（黑名单 + 沙箱 + 超时 + 截断）
 │   ├── search_tools.py   # grep_search
-│   └── registry.py       # ToolRegistry（三级权限：READ/WRITE/EXECUTE + 审批门）
+│   ├── registry.py       # ToolRegistry（三级权限：READ/WRITE/EXECUTE + 审批门）
+│   └── mcp_tools.py      # MCP 工具生态接入（可选，客户端侧）
 ├── bus/                  # 消息总线
 │   ├── message.py        # Message dataclass + MessageIntent 枚举
 │   ├── bus.py            # MessageBus（pub/sub + 拦截器链 + 消息历史）
@@ -192,6 +193,7 @@ streamlit run agent_forge/dashboard/app.py
 | [002](docs/adr/002-message-bus-design.md) | 消息总线设计：Pub/Sub vs 点对点 |
 | [003](docs/adr/003-orchestrator-design.md) | Orchestrator 设计：Plan-and-Execute + 审查回退 |
 | [004](docs/adr/004-tool-permissions.md) | 工具权限分级设计 |
+| [005](docs/adr/005-mcp-tool-ecosystem.md) | MCP 工具生态接入 |
 
 ---
 

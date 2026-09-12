@@ -131,3 +131,41 @@ tracker.print_report()
 ---
 
 > **最后更新**：2026-06-12
+
+
+---
+
+## MCP 工具生态接入（可选）
+
+通过 `langchain-mcp-adapters` 消费任意 MCP server 的第三方工具。
+依赖：`uv pip install -e ".[mcp]"`。
+
+```python
+import sys
+from agent_forge.tools import ToolPermission, ToolRegistry
+from agent_forge.tools.mcp_tools import load_mcp_tools_into_registry
+
+registry = ToolRegistry()
+registered = load_mcp_tools_into_registry(
+    {
+        "demo": {
+            "command": sys.executable,
+            "args": ["demos/mcp_demo_server.py"],
+            "transport": "stdio",
+        },
+    },
+    registry,
+    # 安全默认：EXECUTE 权限 + requires_approval=True（审批门）
+)
+
+# 绑定到 Agent 时提供审批回调（Human-in-the-Loop）
+tools = registry.bind_tools(
+    ToolPermission.EXECUTE,
+    approval_callback=lambda name, args: console_confirm(name, args),
+)
+```
+
+设计要点（详见 ADR-005）：
+- 常驻后台事件循环桥接同步框架与异步 MCP SDK，会话复用，调用带超时
+- MCP 工具默认 EXECUTE 权限 + 需审批（第三方工具按最高风险对待）
+- 工具描述截断 500 字符，防提示注入膨胀
