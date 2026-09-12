@@ -80,7 +80,7 @@ Orchestrator（Plan-and-Execute）
     │       ├── Coder Agent（ReAct 循环）
     │       │     ├── agent_node: LLM 推理
     │       │     ├── tool_node: 执行工具（read_file / write_file / run_shell）
-    │       │     └── should_continue: 循环保护（max_turns）
+    │       │     └── should_continue: 循环保护（max_turns + 循环检测 + 失败熔断）
     │       │
     │       └── Reviewer Agent（ReAct 循环）
     │             ├── agent_node: LLM 推理

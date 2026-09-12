@@ -44,9 +44,11 @@
             return "你是代码审查专家。请逐行审查代码，关注安全性和性能。"
 """
 
+# ─── LangChain 消息类型 ───────────────────────────────────
+import json
+from collections import deque
 from typing import Annotated, Literal
 
-# ─── LangChain 消息类型 ───────────────────────────────────
 from langchain_core.messages import (
     AIMessage,
     HumanMessage,
@@ -175,6 +177,15 @@ class BaseAgent:
         self._hooks = hooks or HookManager()
         self._cost_tracker = cost_tracker
 
+        # ── 死循环兜底（阶段 6）──
+        # 连续失败阈值：LLM/工具连续失败达到该次数即终止（轻量熔断）
+        self._failure_threshold = 3
+        # 运行时守卫状态（每次 run/invoke 开始时重置）
+        self._consecutive_failures = 0
+        self._loop_blocks = 0
+        self._tool_call_history: deque = deque(maxlen=6)
+        self._terminated_reason = ""
+
         # ── 记忆工具注入 ──
         if enable_memory_tools and long_term_memory:
             mem_tools = create_memory_tools(long_term_memory)
@@ -250,6 +261,9 @@ class BaseAgent:
             "user_input": user_input,
         })
 
+        # 重置死循环兜底的运行时守卫
+        self._reset_runtime_guards()
+
         # 调用编译好的 StateGraph
         default_config = {"recursion_limit": self._max_turns * 3 + 5}
         if config:
@@ -275,10 +289,18 @@ class BaseAgent:
                 final_text = content
                 break
 
-        # 发布"处理完成"事件
+        # ── 兜底输出：异常终止时返回结构化降级信息 ──
+        # 旧行为：触发 max_turns 时直接结束，最后一条带 tool_calls 的
+        # AIMessage 被当作答复（或空字符串），调用方无从得知任务没做完
+        terminated_reason = self._terminated_reason
+        if terminated_reason:
+            final_text = self._build_fallback_output(terminated_reason, final_text)
+
+        # 发布"处理完成"事件（terminated 标识是否异常终止）
         self._publish_event(MessageIntent.EVENT, {
             "event_type": "agent.completed",
             "result": final_text[:200],
+            "terminated": bool(terminated_reason),
         })
 
         # ── 存入短期记忆 ──
@@ -288,6 +310,45 @@ class BaseAgent:
                 self._memory.add(AIMessage(content=final_text))
 
         return final_text
+
+    def _reset_runtime_guards(self) -> None:
+        """重置死循环兜底的运行时守卫（每次 run/invoke 开始时调用）。"""
+        self._consecutive_failures = 0
+        self._loop_blocks = 0
+        self._tool_call_history.clear()
+        self._terminated_reason = ""
+
+    # 兜底输出：终止原因 → (人话描述, 行动建议)
+    _REASON_DETAILS = {
+        "max_turns": (
+            "已达本轮思考轮数上限（max_turns）",
+            "可调高 max_turns，或将任务拆分为更小的步骤分次执行",
+        ),
+        "tool_loop": (
+            "检测到重复工具调用（相同工具以相同参数反复执行）",
+            "请检查任务描述是否让 Agent 陷入循环，或调整工具参数约束",
+        ),
+        "consecutive_failures": (
+            "LLM/工具连续多次执行失败",
+            "请检查 API Key、网络状况或工具可用性后重试",
+        ),
+        "llm_error": (
+            "LLM 调用失败",
+            "请检查 API 配置（Key/模型/网络）后重试",
+        ),
+    }
+
+    def _build_fallback_output(self, reason: str, last_content: str) -> str:
+        """构建结构化兜底输出：如实说明任务未完成的原因与最后进展。"""
+        description, suggestion = self._REASON_DETAILS.get(
+            reason, (reason, "请检查运行日志")
+        )
+        progress = last_content.strip() if last_content else "（无有效产出）"
+        return (
+            f"[任务未完全完成] 原因：{description}\n"
+            f"已完成的最后进展：\n{progress[:1000]}\n"
+            f"建议：{suggestion}"
+        )
 
     def invoke(self, messages: list) -> dict:
         """低级调用接口 —— 直接传入消息列表，返回完整状态。
@@ -303,6 +364,7 @@ class BaseAgent:
         Returns:
             StateGraph 的完整输出 dict，包含 "messages" 键。
         """
+        self._reset_runtime_guards()
         config = {"recursion_limit": self._max_turns * 3 + 5}
         return self._compiled.invoke({"messages": messages}, config=config)
 
@@ -367,7 +429,14 @@ class BaseAgent:
         except Exception as e:
             error_msg = f"[LLM 调用失败] {type(e).__name__}: {e}"
             safe_print(f"  [{self.name}] {error_msg}")
+            # LLM 失败：错误 AIMessage 无 tool_calls，循环随即自然结束，
+            # 这里只需记录终止原因（供兜底输出）
+            if not self._terminated_reason:
+                self._terminated_reason = "llm_error"
             return {"messages": [AIMessage(content=error_msg)]}
+        # 注意：LLM 成功不清零连续失败计数——agent_node 在每次工具调用
+        # 之间都会执行，若在此清零，工具的连续失败永远到不了熔断阈值。
+        # 计数只围绕工具执行（见 tool_node）。
 
         # ── 触发 post_llm_call hook ──
         self._hooks.trigger("post_llm_call", agent=self.name, response=response)
@@ -413,6 +482,37 @@ class BaseAgent:
 
             safe_print(f"  [{self.name}] 调用工具: {tool_name}")
 
+            # ── 循环检测（阶段 6）──
+            # 相同 (工具, 参数) 连续出现 3 次 → 本次调用不执行，向 LLM
+            # 返回拦截警告；单轮内累计拦截 2 次后由 should_continue 强制终止。
+            # 场景：LLM 对同一失败路径反复重试（如反复读不存在的文件），
+            # 无此防护时会耗尽 max_turns 才停下，白白烧掉 token。
+            signature = (
+                f"{tool_name}:"
+                f"{json.dumps(tool_args, sort_keys=True, ensure_ascii=False, default=str)}"
+            )
+            self._tool_call_history.append(signature)
+            last_three = list(self._tool_call_history)[-3:]
+            if len(last_three) == 3 and len(set(last_three)) == 1:
+                self._loop_blocks += 1
+                safe_print(
+                    f"  [{self.name}] 🔄 循环拦截 #{self._loop_blocks}: {tool_name}"
+                )
+                if self._loop_blocks >= 2:
+                    self._terminated_reason = "tool_loop"
+                results.append(
+                    ToolMessage(
+                        content=(
+                            f"错误：检测到重复工具调用（'{tool_name}' 以相同参数"
+                            f"连续执行 3 次）。请改变策略：调整参数、换一种方法，"
+                            f"或直接给出最终答复。"
+                        ),
+                        tool_call_id=tool_call["id"],
+                        name=tool_name,
+                    )
+                )
+                continue
+
             # ── 触发 pre_tool_use hook ──
             self._hooks.trigger(
                 "pre_tool_use", agent=self.name,
@@ -432,6 +532,13 @@ class BaseAgent:
                 except Exception as e:
                     output = f"工具 '{tool_name}' 执行失败：{type(e).__name__}: {e}"
                     safe_print(f"  [{self.name}] 失败: {output}")
+                    # 工具抛异常也计入连续失败（工具返回错误串不算失败，
+                    # 那是正常的 LLM 可见反馈）
+                    self._consecutive_failures += 1
+                    if self._consecutive_failures >= self._failure_threshold:
+                        self._terminated_reason = "consecutive_failures"
+                else:
+                    self._consecutive_failures = 0
 
             # ── 触发 post_tool_use hook ──
             self._hooks.trigger(
@@ -461,7 +568,8 @@ class BaseAgent:
 
         从 phase0_demo Step 3 提取，逻辑一致：
         1. 循环保护：统计本轮 AIMessage 数量，超过 max_turns 强制终止
-        2. 正常路由：有 tool_calls → "tools"，否则 → "__end__"
+        2. 兜底熔断：循环拦截达上限 / 连续失败达阈值 → 强制终止
+        3. 正常路由：有 tool_calls → "tools"，否则 → "__end__"
 
         为什么用 AIMessage 数量而不是总消息数量？
         - 每轮 ReAct = 1 个 AIMessage + N 个 ToolMessage
@@ -490,6 +598,25 @@ class BaseAgent:
                 f"  [{self.name}] 已达 {ai_count} 轮思考上限"
                 f"（max_turns={self._max_turns}），强制终止"
             )
+            if not self._terminated_reason:
+                self._terminated_reason = "max_turns"
+            return "__end__"
+
+        # ── 循环拦截达上限：LLM 已收到 2 次重复调用警告仍要调工具 ──
+        if self._loop_blocks >= 2:
+            safe_print(
+                f"  [{self.name}] 检测到持续工具循环（拦截 {self._loop_blocks} 次），"
+                f"强制终止"
+            )
+            return "__end__"
+
+        # ── 连续失败熔断（轻量）──
+        if self._consecutive_failures >= self._failure_threshold:
+            safe_print(
+                f"  [{self.name}] 连续失败 {self._consecutive_failures} 次，"
+                f"熔断终止"
+            )
+            self._terminated_reason = "consecutive_failures"
             return "__end__"
 
         # ── 无工具时直接结束 ──

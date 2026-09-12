@@ -2,9 +2,11 @@
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 
 from agent_forge.agents import BaseAgent
 from agent_forge.tools import ALL_TOOLS, read_file
+from tests.fakes import FakeToolCallingLLM
 
 
 @pytest.mark.slow
@@ -89,3 +91,121 @@ class TestLoopProtection:
         agent = BaseAgent(name="t", role="r", tools=[], max_turns=5)
         messages = [HumanMessage(content="hi"), AIMessage(content="答")]
         assert agent.should_continue({"messages": messages}) == "__end__"
+
+
+# ─── 死循环兜底四件套（阶段 6，全部使用假 LLM，无真实 API 调用）──────
+
+
+def _tc(name: str = "read_file", path: str = "a.py", call_id: str = "c1") -> AIMessage:
+    """构造一条带工具调用的 AIMessage。"""
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": {"path": path}, "id": call_id}],
+    )
+
+
+class TestLoopDetection:
+    """循环检测：相同 (工具, 参数) 连续 3 次被拦截。"""
+
+    def _agent(self, responses, max_turns: int = 8) -> BaseAgent:
+        return BaseAgent(
+            name="t", role="r", tools=[read_file],
+            llm=FakeToolCallingLLM(responses=responses),
+            max_turns=max_turns,
+        )
+
+    def test_identical_calls_blocked_third_time(self):
+        agent = self._agent([
+            _tc("read_file", "x.py", "c1"),
+            _tc("read_file", "x.py", "c2"),
+            _tc("read_file", "x.py", "c3"),
+            AIMessage(content="换了个方法完成了"),
+        ])
+        result = agent.run("任务")
+        assert result == "换了个方法完成了"
+        assert agent._loop_blocks == 1
+
+    def test_persistent_loop_terminates_with_fallback(self):
+        """连续拦截 2 轮后强制终止并返回兜底输出。"""
+        agent = self._agent([_tc("read_file", "x.py", f"c{i}") for i in range(4)])
+        result = agent.run("任务")
+        assert "任务未完全完成" in result
+        assert "重复工具调用" in result
+        assert agent._terminated_reason == "tool_loop"
+
+    def test_different_args_not_blocked(self):
+        agent = self._agent([
+            _tc("read_file", "a.py", "c1"),
+            _tc("read_file", "b.py", "c2"),
+            AIMessage(content="done"),
+        ])
+        result = agent.run("任务")
+        assert result == "done"
+        assert agent._loop_blocks == 0
+
+
+class TestFailureCircuitBreaker:
+    """连续失败熔断（轻量）：工具连续抛异常 3 次 → 终止 + 兜底输出。"""
+
+    def test_consecutive_tool_failures_abort(self):
+        @tool
+        def boom(attempt: int = 0) -> str:
+            """总是抛异常的测试工具（参数可变，避免触发循环检测）。"""
+            raise RuntimeError(f"x{attempt}")
+
+        responses = [
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "boom", "args": {"attempt": i}, "id": f"c{i}"}],
+            )
+            for i in range(4)
+        ]
+        agent = BaseAgent(
+            name="t", role="r", tools=[boom],
+            llm=FakeToolCallingLLM(responses=responses),
+            max_turns=10,
+        )
+        result = agent.run("任务")
+        assert "任务未完全完成" in result
+        assert "连续多次执行失败" in result
+        assert agent._terminated_reason == "consecutive_failures"
+
+    def test_llm_error_returns_fallback(self):
+        class _ExplodingLLM(FakeToolCallingLLM):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                raise RuntimeError("api down")
+
+        agent = BaseAgent(
+            name="t", role="r", tools=[],
+            llm=_ExplodingLLM(responses=[]),
+            max_turns=3,
+        )
+        result = agent.run("任务")
+        assert "任务未完全完成" in result
+        assert "LLM 调用失败" in result
+
+
+class TestMaxTurnsFallback:
+    """max_turns 触发后返回结构化兜底输出（旧版静默返回空/半截内容）。"""
+
+    def test_max_turns_returns_fallback(self):
+        responses = [_tc("read_file", "x.py", f"c{i}") for i in range(5)]
+        agent = BaseAgent(
+            name="t", role="r", tools=[read_file],
+            llm=FakeToolCallingLLM(responses=responses),
+            max_turns=1,
+        )
+        result = agent.run("任务")
+        assert "任务未完全完成" in result
+        assert "思考轮数上限" in result
+        assert agent._terminated_reason == "max_turns"
+
+    def test_normal_completion_no_fallback(self):
+        agent = BaseAgent(
+            name="t", role="r", tools=[read_file],
+            llm=FakeToolCallingLLM(responses=[AIMessage(content="正常答复")]),
+            max_turns=3,
+        )
+        result = agent.run("任务")
+        assert result == "正常答复"
+        assert agent._terminated_reason == ""

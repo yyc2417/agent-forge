@@ -74,7 +74,7 @@ graph LR
 
 | 模块 | 设计 | 关键技术 |
 |------|------|----------|
-| **Agent 抽象** | BaseAgent 模板方法模式，子类只定制 role + tools + prompt | LangGraph StateGraph, ReAct 循环 |
+| **Agent 抽象** | BaseAgent 模板方法模式 + 死循环兜底（循环检测/失败熔断/兜底输出） | LangGraph StateGraph, ReAct 循环 |
 | **消息总线** | Pub/Sub 发布-订阅，Agent 间解耦通信 | 多维路由（intent/role/wildcard）, 拦截器链 |
 | **编排引擎** | Plan-and-Execute + 审查回退的混合模式 | 条件边, 状态机, LLM 任务拆解 |
 | **分层记忆** | 短期（滑动窗口+摘要压缩）+ 长期（JSON 持久化）+ 会话管理 | 自动保存/加载 |
