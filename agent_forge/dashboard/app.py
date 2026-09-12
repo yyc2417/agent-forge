@@ -12,9 +12,14 @@
 线程模型（重要）：
     Streamlit 不允许从裸线程读写 st.session_state（会抛
     NoSessionContext 或静默丢失写入）。因此：
-    - 后台线程只操作通过参数传入的 collector/cost_tracker
-      和一个普通的 _TaskRunResult 信箱
+    - 后台线程只操作通过参数传入的 collector/cost_tracker、
+      approval_broker 和一个普通的 _TaskRunResult 信箱
     - 主脚本每轮 rerun 从信箱取结果，写回 session_state（主线程内）
+
+人工审批（HITL）：
+    run_shell 等执行类工具经 ToolRegistry 审批门绑定——调用前
+    worker 阻塞在 ApprovalBroker 上，主脚本每轮 rerun 渲染
+    "批准 / 拒绝"卡片；超时（300s）无人决定自动拒绝（fail-safe）
 
 页面结构（4 个 Tab）：
     Tab 1: 任务总览 — 任务输入 + 执行 + 结果展示
@@ -39,6 +44,7 @@ from dotenv import load_dotenv
 from agent_forge.agents import CoderAgent, Orchestrator, ReviewerAgent
 from agent_forge.bus import LoggingInterceptor, MessageBus
 from agent_forge.cost import CostTracker
+from agent_forge.dashboard.approval import ApprovalBroker
 from agent_forge.dashboard.collector import (
     STATUS_CALLING_TOOL,
     STATUS_COMPLETED,
@@ -47,6 +53,7 @@ from agent_forge.dashboard.collector import (
     STATUS_THINKING,
     BusCollector,
 )
+from agent_forge.tools import ToolRegistry, get_default_registry
 
 # 加载 .env（DEEPSEEK_API_KEY 等）
 load_dotenv()
@@ -97,6 +104,8 @@ if "thread" not in st.session_state:
     st.session_state.thread = None
 if "result_box" not in st.session_state:
     st.session_state.result_box = _TaskRunResult()
+if "approval_broker" not in st.session_state:
+    st.session_state.approval_broker = ApprovalBroker(timeout=300)
 if "task_result" not in st.session_state:
     st.session_state.task_result = None
 if "task_error" not in st.session_state:
@@ -107,11 +116,29 @@ if "auto_refresh" not in st.session_state:
 
 # ─── 任务执行函数（在后台线程中运行）───────────────────────
 
+def _make_tool_registry(broker: ApprovalBroker) -> ToolRegistry:
+    """构造带审批门的工具注册表（仅 Dashboard 会话内使用，不污染全局）。
+
+    内置工具中原样复制；run_shell（EXECUTE 级）标记为需要人工审批
+    ——注册进独立的 ToolRegistry，而不是改全局默认注册表。
+    """
+    default = get_default_registry()
+    registry = ToolRegistry()
+    for tool in default.get_all_tools():
+        registry.register(
+            tool,
+            default.get_permission(tool.name),
+            requires_approval=(tool.name == "run_shell"),
+        )
+    return registry
+
+
 def _run_task(
     task: str,
     collector: BusCollector,
     cost_tracker: CostTracker,
     result_box: _TaskRunResult,
+    broker: ApprovalBroker,
 ) -> None:
     """后台线程执行的任务函数。
 
@@ -130,8 +157,12 @@ def _run_task(
         collector.clear()
         cost_tracker.clear()
 
-        # 创建 Agent 团队
-        coder = CoderAgent(bus=bus, cost_tracker=cost_tracker)
+        # 创建 Agent 团队（coder 的 run_shell 经审批门，需人工批准）
+        registry = _make_tool_registry(broker)
+        coder = CoderAgent(
+            bus=bus, cost_tracker=cost_tracker,
+            registry=registry, approval_callback=broker.request,
+        )
         reviewer = ReviewerAgent(bus=bus, cost_tracker=cost_tracker)
         orchestrator = Orchestrator(
             specialists={"coder": coder, "reviewer": reviewer},
@@ -211,6 +242,22 @@ if _pending_error is not None:
 if _pending_result is not None:
     st.session_state.task_result = _pending_result
 
+# ─── 待审批工具调用（HITL）────────────────────────────────
+
+_pending_approvals = st.session_state.approval_broker.pending()
+if _pending_approvals:
+    st.warning(f"⏸️ {len(_pending_approvals)} 个工具调用等待审批（超时将自动拒绝）")
+    for _req in _pending_approvals:
+        with st.container(border=True):
+            st.markdown(f"**工具：** `{_req.tool_name}`　**参数：** `{_req.tool_args}`")
+            _c1, _c2, _ = st.columns([1, 1, 3])
+            if _c1.button("✅ 批准执行", key=f"approve-{_req.request_id}"):
+                st.session_state.approval_broker.resolve(_req.request_id, True)
+                st.rerun()
+            if _c2.button("❌ 拒绝", key=f"deny-{_req.request_id}"):
+                st.session_state.approval_broker.resolve(_req.request_id, False)
+                st.rerun()
+
 # ─── 主区域：4 个 Tab ──────────────────────────────────────
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -242,6 +289,7 @@ with tab1:
                     st.session_state.collector,
                     st.session_state.cost_tracker,
                     st.session_state.result_box,
+                    st.session_state.approval_broker,
                 ),
                 daemon=True,
             )

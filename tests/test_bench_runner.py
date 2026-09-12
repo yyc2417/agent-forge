@@ -45,7 +45,9 @@ class TestRunnerTimeout:
             time.sleep(2)
 
         task = _make_task(setup_fn=slow_setup, timeout=1)
-        runner = BenchmarkRunner(runs=1, timeout=1, report_dir=str(tmp_path))
+        # 注入 fake 工厂：超时后的孤儿线程不会发起真实 LLM 调用
+        runner = BenchmarkRunner(runs=1, timeout=1, report_dir=str(tmp_path),
+                                 agent_factory=_fake_factory())
         metrics = runner._run_single(task, "single", 0)
 
         assert metrics.success is False

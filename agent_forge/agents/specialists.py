@@ -59,11 +59,11 @@ class CoderAgent(BaseAgent):
     # 经 ToolRegistry 绑定工具时允许的最大权限级别
     _max_permission = ToolPermission.EXECUTE
 
-    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, approval_callback=None, **kwargs):
         super().__init__(
             name="coder",
             role="资深 Python 工程师，擅长编写简洁、可读、健壮的代码",
-            tools=registry.bind_tools(self._max_permission) if registry
+            tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
             else [read_file, write_file, run_shell],
             bus=bus,
             llm=llm,
@@ -115,11 +115,11 @@ class ReviewerAgent(BaseAgent):
     # 经 ToolRegistry 绑定工具时允许的最大权限级别（只读角色）
     _max_permission = ToolPermission.READ
 
-    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, approval_callback=None, **kwargs):
         super().__init__(
             name="reviewer",
             role="代码审查专家，关注安全性、性能和代码风格",
-            tools=registry.bind_tools(self._max_permission) if registry
+            tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
             else [read_file],
             bus=bus,
             llm=llm,
@@ -174,11 +174,11 @@ class AnalystAgent(BaseAgent):
     # 经 ToolRegistry 绑定工具时允许的最大权限级别（只读角色）
     _max_permission = ToolPermission.READ
 
-    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, approval_callback=None, **kwargs):
         super().__init__(
             name="analyst",
             role="需求分析师，擅长项目结构分析和需求拆解",
-            tools=registry.bind_tools(self._max_permission) if registry
+            tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
             else [read_file, grep_search],
             bus=bus,
             llm=llm,
@@ -229,11 +229,11 @@ class WriterAgent(BaseAgent):
     # 经 ToolRegistry 绑定工具时允许的最大权限级别（可写不可执行）
     _max_permission = ToolPermission.WRITE
 
-    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, approval_callback=None, **kwargs):
         super().__init__(
             name="writer",
             role="技术文档撰写专家，擅长整合信息生成结构化报告",
-            tools=registry.bind_tools(self._max_permission) if registry
+            tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
             else [read_file, write_file],
             bus=bus,
             llm=llm,
