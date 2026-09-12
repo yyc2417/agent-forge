@@ -1,3 +1,5 @@
+from benchmark.tasks.sample_project import create as _create_sample
+
 TASK = {
     "id": "easy-05",
     "name": "文件搜索",
@@ -8,3 +10,8 @@ TASK = {
         "values": ["base.py"],
     },
 }
+
+
+def setup(work_dir):
+    """创建含 class BaseAgent 的样例项目（隔离目录原本为空）。"""
+    _create_sample(work_dir)

@@ -1,3 +1,5 @@
+from benchmark.tasks.sample_project import create as _create_sample
+
 TASK = {
     "id": "easy-02",
     "name": "读取文件",
@@ -8,3 +10,8 @@ TASK = {
         "values": ["AgentForge"],
     },
 }
+
+
+def setup(work_dir):
+    """提供被读取的 README.md（隔离目录原本为空，任务否则不可满足）。"""
+    _create_sample(work_dir)
