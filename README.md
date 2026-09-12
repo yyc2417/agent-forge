@@ -142,7 +142,7 @@ benchmark/                    # 量化评测框架
 ├── reporter.py               #   Markdown 报告生成
 └── tasks/                    #   20 个标准任务（8 easy + 8 medium + 4 hard）
 
-tests/                        # 单元测试（100 用例 + GitHub Actions CI）
+tests/                        # 单元测试（190+ 用例 + GitHub Actions CI）
 demos/                        # 渐进式 Demo + 多场景工作流
 docs/                         # 模块文档 + ADR + 学习笔记
 ```
@@ -154,7 +154,7 @@ docs/                         # 模块文档 + ADR + 学习笔记
 | Agent 框架 | LangGraph（状态图驱动） |
 | LLM | DeepSeek V4-Flash（兼容 OpenAI 格式） |
 | 可视化 | Streamlit Dashboard |
-| 测试 | pytest（100 用例）+ GitHub Actions CI |
+| 测试 | pytest（190+ 用例）+ GitHub Actions CI |
 | Lint | ruff |
 | 依赖管理 | uv + pyproject.toml |
 
