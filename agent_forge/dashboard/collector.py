@@ -106,9 +106,14 @@ class BusCollector:
     def attach(self, bus: MessageBus) -> None:
         """绑定到指定的 MessageBus，订阅 "*" 通配符事件。
 
+        幂等：重复 attach 同一个 Bus 不会重复订阅
+        （重复订阅会导致消息与计数全部翻倍）。
+
         Args:
             bus: 要绑定的消息总线。
         """
+        if self._bus is bus:
+            return
         self._bus = bus
         self._start_time = time.time()
         bus.subscribe("*", self._on_message)
@@ -162,7 +167,7 @@ class BusCollector:
 
         snapshot = self._agent_states[role]
         snapshot.last_event_type = event_type
-        snapshot.last_active = time.time()
+        # last_active 统一由 _on_message 步骤 4 用 message.timestamp 写入
 
         # 状态映射
         new_status = _EVENT_STATUS_MAP.get(event_type)

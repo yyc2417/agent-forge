@@ -44,3 +44,10 @@ code-review*.md
 
 # Benchmark 生成的报告（不跟踪）
 benchmark/reports/latest/
+
+# Qoder 记忆导出与 IDE 使用指南（内部资料，不公开）
+项目记忆.md
+docs/repo-wiki-knowledge-card-guide.md
+
+# ZCode 会话元数据
+.zcode/

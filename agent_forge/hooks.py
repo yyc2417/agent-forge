@@ -1,14 +1,19 @@
 """生命周期 Hooks 管理器
 
-提供 Agent 执行过程中的 5 个标准事件钩子，允许外部代码在关键节点
+提供 Agent 执行过程中的 4 个标准事件钩子，允许外部代码在关键节点
 插入自定义逻辑（日志、监控、调试、成本统计等）。
 
-5 个标准事件：
-    - pre_llm_call:       LLM 调用前（可修改消息列表）
-    - post_llm_call:      LLM 调用后（可检查响应）
-    - pre_tool_use:       工具执行前（可拦截/修改参数）
-    - post_tool_use:      工具执行后（可检查结果）
-    - on_message_received: 收到 Bus 消息时
+4 个标准事件：
+    - pre_llm_call:  LLM 调用前（观察消息列表）
+    - post_llm_call: LLM 调用后（观察响应）
+    - pre_tool_use:  工具执行前（观察调用参数）
+    - post_tool_use: 工具执行后（观察输出）
+
+能力边界（如实声明）：
+    Hooks 是纯观察者——回调无法修改消息、参数或返回值，也无法
+    中断流程（trigger 不消费回调返回值）。需要"拦截/修改"语义的
+    场景请使用 MessageInterceptor（消息层）或 ToolRegistry 的
+    审批门（工具层）。
 
 设计理念：
     Hooks 是观察者模式的实现——Agent 的核心逻辑不关心谁在监听，
@@ -37,14 +42,12 @@ PRE_LLM_CALL = "pre_llm_call"
 POST_LLM_CALL = "post_llm_call"
 PRE_TOOL_USE = "pre_tool_use"
 POST_TOOL_USE = "post_tool_use"
-ON_MESSAGE_RECEIVED = "on_message_received"
 
 ALL_EVENTS = [
     PRE_LLM_CALL,
     POST_LLM_CALL,
     PRE_TOOL_USE,
     POST_TOOL_USE,
-    ON_MESSAGE_RECEIVED,
 ]
 
 # 事件类型提示
@@ -53,7 +56,6 @@ HookEvent = Literal[
     "post_llm_call",
     "pre_tool_use",
     "post_tool_use",
-    "on_message_received",
 ]
 
 
@@ -67,11 +69,10 @@ class HookManager:
     这样未来新增 Hook 事件不会破坏已有回调。
 
     各事件的 kwargs 内容：
-    - pre_llm_call:       agent=str, messages=list
-    - post_llm_call:      agent=str, response=AIMessage
-    - pre_tool_use:       agent=str, tool_name=str, tool_args=dict
-    - post_tool_use:      agent=str, tool_name=str, output=str
-    - on_message_received: agent=str, message=Message
+    - pre_llm_call:  agent=str, messages=list
+    - post_llm_call: agent=str, response=AIMessage
+    - pre_tool_use:  agent=str, tool_name=str, tool_args=dict
+    - post_tool_use: agent=str, tool_name=str, output=str
     """
 
     def __init__(self) -> None:

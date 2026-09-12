@@ -9,6 +9,13 @@
     - st.session_state 持有 BusCollector、Thread 等跨 rerun 状态
     - 任务运行中每 2 秒 st.rerun() 自动刷新
 
+线程模型（重要）：
+    Streamlit 不允许从裸线程读写 st.session_state（会抛
+    NoSessionContext 或静默丢失写入）。因此：
+    - 后台线程只操作通过参数传入的 collector/cost_tracker
+      和一个普通的 _TaskRunResult 信箱
+    - 主脚本每轮 rerun 从信箱取结果，写回 session_state（主线程内）
+
 页面结构（4 个 Tab）：
     Tab 1: 任务总览 — 任务输入 + 执行 + 结果展示
     Tab 2: 消息流时间线 — 实时消息列表 + 过滤
@@ -52,6 +59,34 @@ st.set_page_config(
     layout="wide",
 )
 
+# ─── 后台线程结果信箱 ──────────────────────────────────────
+
+class _TaskRunResult:
+    """后台线程 → 主脚本的结果信箱（线程安全）。
+
+    后台线程调用 put()，主脚本每轮 rerun 调用 take() 取走。
+    为什么不用 st.session_state？见模块 docstring 的线程模型说明。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._result = None
+        self._error = None
+
+    def put(self, result=None, error=None) -> None:
+        with self._lock:
+            self._result = result
+            self._error = error
+
+    def take(self) -> tuple:
+        """取走结果（取后即清空）。返回 (result, error)。"""
+        with self._lock:
+            result, error = self._result, self._error
+            self._result = None
+            self._error = None
+            return result, error
+
+
 # ─── session_state 初始化 ──────────────────────────────────
 
 if "collector" not in st.session_state:
@@ -60,6 +95,8 @@ if "cost_tracker" not in st.session_state:
     st.session_state.cost_tracker = CostTracker()
 if "thread" not in st.session_state:
     st.session_state.thread = None
+if "result_box" not in st.session_state:
+    st.session_state.result_box = _TaskRunResult()
 if "task_result" not in st.session_state:
     st.session_state.task_result = None
 if "task_error" not in st.session_state:
@@ -70,22 +107,27 @@ if "auto_refresh" not in st.session_state:
 
 # ─── 任务执行函数（在后台线程中运行）───────────────────────
 
-def _run_task(task: str) -> None:
+def _run_task(
+    task: str,
+    collector: BusCollector,
+    cost_tracker: CostTracker,
+    result_box: _TaskRunResult,
+) -> None:
     """后台线程执行的任务函数。
 
     创建完整的 Agent 团队（Orchestrator + Coder + Reviewer），
-    通过 BusCollector 采集事件，运行完毕后写入 session_state。
+    通过 BusCollector 采集事件，运行完毕后把结果放进信箱。
+
+    注意：本函数在裸线程中运行，全程不得访问 st.session_state——
+    collector / cost_tracker / result_box 都由主线程作为参数传入。
     """
     try:
-        # 创建 Bus + Collector + CostTracker
+        # 创建 Bus，绑定采集器
         bus = MessageBus()
         bus.add_interceptor(LoggingInterceptor())
 
-        collector: BusCollector = st.session_state.collector
         collector.attach(bus)
         collector.clear()
-
-        cost_tracker: CostTracker = st.session_state.cost_tracker
         cost_tracker.clear()
 
         # 创建 Agent 团队
@@ -99,13 +141,10 @@ def _run_task(task: str) -> None:
 
         # 运行编排
         result = orchestrator.run(task)
-        st.session_state.task_result = result
+        result_box.put(result=result)
 
     except Exception as e:
-        st.session_state.task_error = f"{type(e).__name__}: {e}"
-    finally:
-        # 标记线程结束
-        st.session_state.thread = None
+        result_box.put(error=f"{type(e).__name__}: {e}")
 
 
 # ─── 侧边栏 ────────────────────────────────────────────────
@@ -164,6 +203,14 @@ with st.sidebar:
             st.rerun()
 
 
+# ─── 收取后台线程结果（必须在主线程内写 session_state）──────
+
+_pending_result, _pending_error = st.session_state.result_box.take()
+if _pending_error is not None:
+    st.session_state.task_error = _pending_error
+if _pending_result is not None:
+    st.session_state.task_result = _pending_result
+
 # ─── 主区域：4 个 Tab ──────────────────────────────────────
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -189,7 +236,14 @@ with tab1:
             st.session_state.task_result = None
             st.session_state.task_error = None
             thread = threading.Thread(
-                target=_run_task, args=(task_input.strip(),), daemon=True
+                target=_run_task,
+                args=(
+                    task_input.strip(),
+                    st.session_state.collector,
+                    st.session_state.cost_tracker,
+                    st.session_state.result_box,
+                ),
+                daemon=True,
             )
             st.session_state.thread = thread
             thread.start()

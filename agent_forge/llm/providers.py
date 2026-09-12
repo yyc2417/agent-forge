@@ -62,4 +62,8 @@ def create_deepseek_llm(
         api_key=SecretStr(api_key),
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
         temperature=temperature,
+        # 单次请求超时 + HTTP 层自动重试：
+        # 防止一次挂起的 API 调用把同步 Agent 循环无限阻塞
+        timeout=60,
+        max_retries=2,
     )

@@ -32,6 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from agent_forge.utils import safe_print
+
 
 @dataclass
 class TaskDefinition:
@@ -60,16 +62,25 @@ class TaskDefinition:
 
 
 def _load_task_module(task_file: Path):
-    """动态加载任务文件的 Python 模块。"""
+    """动态加载任务文件的 Python 模块。
+
+    加载失败（语法错误、导入错误等）打印告警后返回 None——
+    任务不会静默消失，对比报告的任务缩水可以被察觉。
+    """
     module_name = f"benchmark.tasks.{task_file.stem}"
     spec = importlib.util.spec_from_file_location(module_name, task_file)
     if spec is None or spec.loader is None:
+        safe_print(f"  [Tasks] 警告: 无法创建导入规格，跳过任务: {task_file.name}")
         return None
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
         spec.loader.exec_module(module)
-    except Exception:
+    except Exception as e:
+        safe_print(
+            f"  [Tasks] 警告: 任务文件加载失败，已跳过 {task_file.name}: "
+            f"{type(e).__name__}: {e}"
+        )
         return None
     return module
 

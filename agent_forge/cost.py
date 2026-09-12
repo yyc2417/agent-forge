@@ -155,7 +155,7 @@ class CostTracker:
         safe_print(f"{'═' * 62}")
         safe_print(
             f"  {'Agent':<14} {'Calls':>5} {'Prompt':>8} {'Compl':>8} "
-            f"{'Total':>8} {'Cost(¥/1k)':>10}"
+            f"{'Total':>8} {'Cost(¥)':>12}"
         )
         safe_print(f"  {'─' * 14} {'─' * 5} {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 8}")
 

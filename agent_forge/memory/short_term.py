@@ -45,7 +45,7 @@ from langchain_core.messages import (
 )
 from langchain_openai import ChatOpenAI
 
-from agent_forge.utils import safe_print
+from agent_forge.utils import atomic_write_text, safe_print
 
 # ─── 摘要 Prompt ───────────────────────────────────────────
 
@@ -199,11 +199,10 @@ class ShortTermMemory:
             "messages": messages_to_dict(self._messages),
             "max_messages": self._max_messages,
         }
-        file_path = Path(path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(
+        # 原子写入：防止进程崩溃留下截断的半截 JSON
+        atomic_write_text(
+            path,
             json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def load(self, path: str) -> None:

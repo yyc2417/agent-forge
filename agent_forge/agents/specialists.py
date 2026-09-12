@@ -23,16 +23,29 @@
     - ArchitectAgent：架构设计专家
     - TesterAgent：测试用例生成专家
     - ResearcherAgent：信息搜集专家
+
+工具权限接线（阶段 3+）：
+    默认使用各角色硬编码的工具列表（向后兼容）；
+    传入 registry 参数时，通过 ToolRegistry.bind_tools 按角色权限
+    过滤工具（Coder→EXECUTE、Reviewer/Analyst→READ、Writer→WRITE），
+    注册表中 requires_approval 的工具会带上审批门（HITL）。
 """
 
 from agent_forge.agents.base import BaseAgent
-from agent_forge.tools import grep_search, read_file, run_shell, write_file
+from agent_forge.tools import (
+    ToolPermission,
+    ToolRegistry,
+    grep_search,
+    read_file,
+    run_shell,
+    write_file,
+)
 
 
 class CoderAgent(BaseAgent):
     """编码专家 —— 负责根据需求编写高质量代码。
 
-    工具集：read_file + write_file + run_shell
+    工具集：read_file + write_file + run_shell（EXECUTE 级权限）
     - read_file：阅读项目结构和已有代码，理解上下文
     - write_file：将生成的代码写入文件
     - run_shell：运行代码验证正确性、执行测试
@@ -43,11 +56,15 @@ class CoderAgent(BaseAgent):
     - 两者的 system prompt 互补，形成编码-审查闭环
     """
 
-    def __init__(self, bus=None, llm=None, **kwargs):
+    # 经 ToolRegistry 绑定工具时允许的最大权限级别
+    _max_permission = ToolPermission.EXECUTE
+
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
         super().__init__(
             name="coder",
             role="资深 Python 工程师，擅长编写简洁、可读、健壮的代码",
-            tools=[read_file, write_file, run_shell],
+            tools=registry.bind_tools(self._max_permission) if registry
+            else [read_file, write_file, run_shell],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 8),
@@ -92,14 +109,18 @@ class ReviewerAgent(BaseAgent):
 
     为什么用中文方括号【】而不是英文 [OK]/[FAIL]？
     - 中文方括号在 LLM 输出中辨识度更高，不容易被混入正文
-    - 双条件判断（"通过" in result and "不通过" not in result）减少误判
+    - 判定按【通过】/【不通过】标记精确匹配，减少误判
     """
 
-    def __init__(self, bus=None, llm=None, **kwargs):
+    # 经 ToolRegistry 绑定工具时允许的最大权限级别（只读角色）
+    _max_permission = ToolPermission.READ
+
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
         super().__init__(
             name="reviewer",
             role="代码审查专家，关注安全性、性能和代码风格",
-            tools=[read_file],
+            tools=registry.bind_tools(self._max_permission) if registry
+            else [read_file],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 3),
@@ -150,11 +171,15 @@ class AnalystAgent(BaseAgent):
     但不修改任何文件。这与 Coder（读写+执行）形成互补。
     """
 
-    def __init__(self, bus=None, llm=None, **kwargs):
+    # 经 ToolRegistry 绑定工具时允许的最大权限级别（只读角色）
+    _max_permission = ToolPermission.READ
+
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
         super().__init__(
             name="analyst",
             role="需求分析师，擅长项目结构分析和需求拆解",
-            tools=[read_file, grep_search],
+            tools=registry.bind_tools(self._max_permission) if registry
+            else [read_file, grep_search],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 5),
@@ -201,11 +226,15 @@ class WriterAgent(BaseAgent):
     整合为结构清晰的技术报告或文档。与 Analyst（只读）互补。
     """
 
-    def __init__(self, bus=None, llm=None, **kwargs):
+    # 经 ToolRegistry 绑定工具时允许的最大权限级别（可写不可执行）
+    _max_permission = ToolPermission.WRITE
+
+    def __init__(self, bus=None, llm=None, registry: ToolRegistry | None = None, **kwargs):
         super().__init__(
             name="writer",
             role="技术文档撰写专家，擅长整合信息生成结构化报告",
-            tools=[read_file, write_file],
+            tools=registry.bind_tools(self._max_permission) if registry
+            else [read_file, write_file],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 5),

@@ -8,11 +8,18 @@ Agent 通过这两个工具获得最基本的文件 I/O 能力：
     没有工具的 LLM 只能"说话"，无法真正"做事"。
     文件读写是 Agent 最常见的需求——无论是写代码还是生成报告，
     最终都要落盘。
+
+安全设计（sandbox 沙箱）：
+    所有路径经 resolve_in_sandbox 校验：
+    - 相对路径锚定沙箱根（默认为进程 cwd，可用 set_sandbox_root 切换）
+    - 越界的绝对路径 / ".." 逃逸一律拒绝
+    - .env 等敏感文件拒绝读取，防止 API Key 进入 LLM 上下文
 """
 
-from pathlib import Path
 
 from langchain_core.tools import tool
+
+from agent_forge.tools.sandbox import resolve_in_sandbox
 
 
 @tool
@@ -30,18 +37,20 @@ def read_file(path: str) -> str:
         - 不支持读取目录（请用 run_shell 工具执行 ls）
 
     Args:
-        path: 文件的绝对路径或相对路径。
-              相对路径基于 Agent 运行时的工作目录。
+        path: 文件的相对路径或沙箱内的绝对路径。
+              相对路径基于沙箱根目录（默认为进程工作目录）。
 
     Returns:
-        文件内容字符串。如果文件不存在、是目录或编码不匹配，
+        文件内容字符串。如果文件不存在、是目录、越出沙箱边界或编码不匹配，
         返回描述性的错误信息而非抛出异常。
 
     Example:
         >>> read_file.invoke({"path": "README.md"})
         '（返回 README.md 的完整内容）'
     """
-    file_path = Path(path)
+    file_path, sandbox_error = resolve_in_sandbox(path)
+    if sandbox_error:
+        return sandbox_error
 
     # 存在性检查
     if not file_path.exists():
@@ -81,10 +90,11 @@ def write_file(path: str, content: str) -> str:
     安全说明：
         - 覆盖写入：如果文件已存在，内容会被替换
         - 自动创建目录：如果父目录不存在，会自动创建
+        - 沙箱限制：只能写入沙箱根目录内的路径；.env 等敏感文件拒绝写入
 
     Args:
-        path: 目标文件的路径。
-              相对路径基于 Agent 运行时的工作目录。
+        path: 目标文件的相对路径或沙箱内的绝对路径。
+              相对路径基于沙箱根目录（默认为进程工作目录）。
         content: 要写入文件的完整内容字符串。
 
     Returns:
@@ -94,8 +104,11 @@ def write_file(path: str, content: str) -> str:
         >>> write_file.invoke({"path": "output/report.md", "content": "# 报告\\n内容..."})
         '成功写入文件：output/report.md（15 字符）'
     """
+    file_path, sandbox_error = resolve_in_sandbox(path)
+    if sandbox_error:
+        return sandbox_error
+
     try:
-        file_path = Path(path)
         # 确保父目录存在
         file_path.parent.mkdir(parents=True, exist_ok=True)
         # 写入文件

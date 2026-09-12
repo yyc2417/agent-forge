@@ -11,9 +11,9 @@ TASK = {
 }
 
 
-def judge(agent_output: str) -> bool:
+def judge(agent_output: str, work_dir: Path) -> bool:
     """自定义评判：报告文件存在 + 包含文件信息 + 包含数字统计 + Markdown 标题。"""
-    report_file = Path("code_stats_report.md")
+    report_file = work_dir / "code_stats_report.md"
     if not report_file.exists():
         return False
 

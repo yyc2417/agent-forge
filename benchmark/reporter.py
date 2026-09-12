@@ -9,6 +9,7 @@
 from datetime import datetime
 from pathlib import Path
 
+from agent_forge.utils import atomic_write_text
 from benchmark.metrics import BenchmarkSummary, TaskMetrics
 
 
@@ -34,11 +35,11 @@ class Reporter:
         summary = BenchmarkSummary.compute(single_metrics, multi_metrics)
         lines = Reporter._build_report(summary, single_metrics, multi_metrics)
 
-        # 写入文件
+        # 写入文件（原子写：防止进程崩溃留下截断的半截报告）
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
         report_file = out_path / "benchmark_report.md"
-        report_file.write_text("\n".join(lines), encoding="utf-8")
+        atomic_write_text(report_file, "\n".join(lines))
 
         return report_file
 

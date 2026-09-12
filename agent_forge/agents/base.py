@@ -127,7 +127,8 @@ class BaseAgent:
     3. 事件发布：thinking / tool_call / completed 三类事件
 
     Attributes:
-        name: Agent 的唯一标识（用于 Message Bus 路由）。
+        name: Agent 的唯一标识（Bus 事件以该名称作为消息的 role，
+              标识"发送方"）。
         role: 角色描述（用于生成 system prompt）。
     """
 
@@ -260,10 +261,18 @@ class BaseAgent:
         )
 
         # 提取最终回复
+        # 注意：AIMessage.content 可能是 str，也可能是 content-block list
+        # （部分 provider 的多模态/分段输出），统一归一为 str
         final_text = ""
         for msg in reversed(result["messages"]):
             if isinstance(msg, AIMessage) and msg.content:
-                final_text = msg.content
+                content = msg.content
+                if not isinstance(content, str):
+                    content = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in content
+                    )
+                final_text = content
                 break
 
         # 发布"处理完成"事件
@@ -451,19 +460,31 @@ class BaseAgent:
         """条件路由：判断继续调工具还是结束。
 
         从 phase0_demo Step 3 提取，逻辑一致：
-        1. 循环保护：统计 AIMessage 数量，超过 max_turns 强制终止
+        1. 循环保护：统计本轮 AIMessage 数量，超过 max_turns 强制终止
         2. 正常路由：有 tool_calls → "tools"，否则 → "__end__"
 
         为什么用 AIMessage 数量而不是总消息数量？
         - 每轮 ReAct = 1 个 AIMessage + N 个 ToolMessage
         - AIMessage 数量 ≈ LLM 思考轮数
         - 总消息数量受工具调用数量影响，不稳定
+
+        为什么只统计最后一条 HumanMessage 之后的消息？
+        - run() 会先注入记忆历史（短期记忆窗口默认 20 条，其中约一半是
+          AIMessage），再追加本轮用户输入
+        - 若把历史一起计入，启用记忆的 Agent 会在首轮就被误判
+          "已达 max_turns" 而静默拒绝工作
         """
         messages = state["messages"]
         last_message = messages[-1]
 
-        # ── 循环保护 ──
-        ai_count = sum(1 for m in messages if isinstance(m, AIMessage))
+        # ── 循环保护（只计本轮：最后一条 HumanMessage 之后）──
+        last_human_idx = 0
+        for i, m in enumerate(messages):
+            if isinstance(m, HumanMessage):
+                last_human_idx = i
+        ai_count = sum(
+            1 for m in messages[last_human_idx + 1:] if isinstance(m, AIMessage)
+        )
         if ai_count > self._max_turns:
             safe_print(
                 f"  [{self.name}] 已达 {ai_count} 轮思考上限"
@@ -548,8 +569,13 @@ class BaseAgent:
     def _register_bus_handlers(self) -> None:
         """注册 Message Bus 的事件处理器。
 
-        默认行为：订阅发给自己的 REQUEST 消息。
-        子类可以覆盖以添加更多订阅。
+        如实说明当前 Bus 的路由能力：事件键只有发送方维度
+        （intent.{x} / role.{发送方} / *），协议中没有"收件人"字段，
+        因此"把 REQUEST 定向发给某个 Agent"的点对点路由暂不支持
+        （记入 ADR-002 未来方向）。
+
+        默认不做任何订阅；子类如需监听全局消息流，可覆盖此方法
+        订阅 "*"（如记录日志、喂给 Dashboard）。
 
         注意：handler 中不应调用 self.run()（会导致递归），
         而是将收到的消息记录下来，由上层编排逻辑处理。

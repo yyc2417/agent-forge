@@ -35,11 +35,12 @@
 
 import json
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_forge.utils import safe_print
+from agent_forge.utils import atomic_write_text, safe_print
 
 
 class SessionManager:
@@ -69,10 +70,13 @@ class SessionManager:
             agent_name: Agent 名称（用于标记会话来源）。
 
         Returns:
-            会话 ID（格式：session_YYYYMMDD_HHMMSS）。
+            会话 ID（格式：session_YYYYMMDD_HHMMSS_xxxx，末尾为随机后缀）。
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_id = f"session_{timestamp}"
+        # 追加 4 位短随机后缀：秒级时间戳在同一秒内创建多个会话时
+        # 会互相覆盖（索引条目丢失 + 数据文件共用）
+        suffix = uuid.uuid4().hex[:4]
+        session_id = f"session_{timestamp}_{suffix}"
 
         self._index[session_id] = {
             "agent_name": agent_name,
@@ -194,21 +198,35 @@ class SessionManager:
     # ─── 内部方法 ──────────────────────────────────────────
 
     def _save_index(self) -> None:
-        """保存会话索引到 JSON 文件。"""
-        self._index_path.write_text(
+        """保存会话索引到 JSON 文件（原子写入）。"""
+        atomic_write_text(
+            self._index_path,
             json.dumps(self._index, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def _load_index(self) -> dict[str, dict[str, Any]]:
-        """从 JSON 文件加载会话索引。"""
+        """从 JSON 文件加载会话索引。
+
+        损坏（JSON 解析失败或类型不是 dict）时先备份原文件再返回空：
+        否则下次 _save_index() 会让所有历史会话变成孤儿文件。
+        """
         if not self._index_path.exists():
             return {}
         try:
-            return json.loads(
-                self._index_path.read_text(encoding="utf-8")
-            )
-        except (json.JSONDecodeError, KeyError):
+            data = json.loads(self._index_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("index 根元素不是 dict")
+            return data
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            backup = self._index_path.with_suffix(".corrupt.bak")
+            try:
+                self._index_path.rename(backup)
+                safe_print(
+                    f"  [SessionManager] 索引损坏: {e}，"
+                    f"已备份到 {backup.name}，从空索引开始"
+                )
+            except OSError:
+                safe_print(f"  [SessionManager] 索引损坏: {e}，从空索引开始")
             return {}
 
     def __repr__(self) -> str:

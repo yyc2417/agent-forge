@@ -36,7 +36,7 @@ from typing import Any
 
 from langchain_core.tools import tool as tool_decorator
 
-from agent_forge.utils import safe_print
+from agent_forge.utils import atomic_write_text, safe_print
 
 # ─── 记忆条目 ──────────────────────────────────────────────
 
@@ -210,10 +210,10 @@ class LongTermMemory:
             }
             for key, entry in self._store.items()
         }
-        self._file_path.parent.mkdir(parents=True, exist_ok=True)
-        self._file_path.write_text(
+        # 原子写入：防止进程崩溃留下截断的半截 JSON
+        atomic_write_text(
+            self._file_path,
             json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
         )
 
     def _load(self) -> None:
@@ -234,7 +234,18 @@ class LongTermMemory:
                     last_accessed=entry_data.get("last_accessed", 0.0),
                 )
         except (json.JSONDecodeError, KeyError) as e:
-            safe_print(f"  [LongTermMemory] 加载失败: {e}，从空存储开始")
+            # 先把损坏文件改名备份，再从空存储开始——
+            # 否则下次 store() 的 _persist() 会用空内容覆盖掉它，
+            # 部分（可能手工可恢复的）数据就彻底没了
+            backup = self._file_path.with_suffix(".corrupt.bak")
+            try:
+                self._file_path.rename(backup)
+                safe_print(
+                    f"  [LongTermMemory] 加载失败: {e}，"
+                    f"损坏文件已备份到 {backup.name}，从空存储开始"
+                )
+            except OSError:
+                safe_print(f"  [LongTermMemory] 加载失败: {e}，从空存储开始")
 
     def clear(self) -> None:
         """清空所有记忆。"""

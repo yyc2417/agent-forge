@@ -15,17 +15,21 @@
     这防止了 Agent 越权操作（如 Reviewer 不应该能修改代码）。
 
 向后兼容：
-    ALL_TOOLS 保持不变（仍然是 list），从默认 Registry 导出。
-    现有代码 from agent_forge.tools import ALL_TOOLS 完全不受影响。
+    ALL_TOOLS 保持不变（动态取自默认 Registry），现有代码
+    from agent_forge.tools import ALL_TOOLS 完全不受影响。
 
 与 OpenAI Function Calling 的关系：
     LangChain 的 @tool 装饰器已经生成了 JSON Schema。
-    ToolRegistry 在此基础上增加权限元数据。
-    bind_tools() 仍然接收工具列表，权限检查在 Agent 构建时完成
-    （只给 Agent 绑定其权限范围内的工具）。
+    ToolRegistry 在此基础上增加权限元数据与审批门。
+    bind_tools() 在 Agent 构建时完成权限过滤
+    （只给 Agent 绑定其权限范围内的工具），
+    requires_approval 的工具在每次调用前征询审批回调（HITL）。
 """
 
 from enum import Enum
+from typing import Callable
+
+from langchain_core.tools import StructuredTool
 
 
 class ToolPermission(str, Enum):
@@ -59,7 +63,7 @@ _PERMISSION_LEVELS = {
 
 
 class ToolRegistry:
-    """工具注册中心 —— 动态注册、发现、权限管理。
+    """工具注册中心 —— 动态注册、发现、权限管理与审批门。
 
     使用方式：
         registry = ToolRegistry()
@@ -70,15 +74,23 @@ class ToolRegistry:
         # 获取只读工具
         read_tools = registry.get_tools(ToolPermission.READ)
 
-        # 获取所有工具
-        all_tools = registry.get_all_tools()
+        # 绑定到 Agent（含审批门，拒绝即返回错误串）
+        tools = registry.bind_tools(
+            ToolPermission.EXECUTE,
+            approval_callback=lambda name, args: confirm(name, args),
+        )
     """
 
     def __init__(self) -> None:
-        # name -> (tool, permission)
+        # name -> (tool, permission, requires_approval)
         self._tools: dict[str, tuple] = {}
 
-    def register(self, tool, permission: ToolPermission) -> None:
+    def register(
+        self,
+        tool,
+        permission: ToolPermission,
+        requires_approval: bool = False,
+    ) -> None:
         """注册一个工具及其权限级别。
 
         如果工具名已存在，则覆盖。
@@ -86,9 +98,11 @@ class ToolRegistry:
         Args:
             tool: LangChain @tool 函数。
             permission: 权限级别。
+            requires_approval: 调用前是否需要人工审批
+                              （bind_tools 提供审批回调时生效）。
         """
         name = tool.name if hasattr(tool, "name") else str(tool)
-        self._tools[name] = (tool, permission)
+        self._tools[name] = (tool, permission, requires_approval)
 
     def unregister(self, tool_name: str) -> None:
         """注销一个工具。
@@ -99,7 +113,7 @@ class ToolRegistry:
         self._tools.pop(tool_name, None)
 
     def get_tools(self, max_permission: ToolPermission) -> list:
-        """获取指定权限级别及以下的工具列表。
+        """获取指定权限级别及以下的工具列表（不做审批包装）。
 
         例如 get_tools(WRITE) 返回 READ + WRITE 权限的工具。
 
@@ -112,13 +126,48 @@ class ToolRegistry:
         max_level = _PERMISSION_LEVELS[max_permission]
         return [
             tool
-            for tool, perm in self._tools.values()
+            for tool, perm, _ in self._tools.values()
             if _PERMISSION_LEVELS[perm] <= max_level
         ]
 
+    def bind_tools(
+        self,
+        max_permission: ToolPermission,
+        approval_callback: Callable[[str, dict], bool] | None = None,
+    ) -> list:
+        """按权限级别过滤工具，并为需审批的工具包上审批门。
+
+        权限检查在 Agent 构建时完成：LLM 根本看不到超出权限的工具。
+        requires_approval 的工具在每次调用前征询 approval_callback，
+        回调返回 False 时工具返回"用户拒绝执行"错误串而非执行。
+        注册了 requires_approval 但未提供回调时，默认全部拒绝
+        （fail-safe：宁可不可用，不可越权）。
+
+        Args:
+            max_permission: 允许绑定的最大权限级别。
+            approval_callback: 审批回调 (tool_name, tool_args) -> bool。
+
+        Returns:
+            可直接传给 BaseAgent(tools=...) 的工具列表。
+        """
+        max_level = _PERMISSION_LEVELS[max_permission]
+        bound: list = []
+        for tool, perm, requires_approval in self._tools.values():
+            if _PERMISSION_LEVELS[perm] > max_level:
+                continue
+            if requires_approval:
+                if approval_callback is None:
+                    callback: Callable[[str, dict], bool] = _always_deny
+                else:
+                    callback = approval_callback
+                bound.append(_wrap_with_approval(tool, callback))
+            else:
+                bound.append(tool)
+        return bound
+
     def get_all_tools(self) -> list:
         """获取所有已注册的工具列表。"""
-        return [tool for tool, _ in self._tools.values()]
+        return [tool for tool, _, _ in self._tools.values()]
 
     def get_permission(self, tool_name: str) -> ToolPermission | None:
         """查询工具的权限级别。
@@ -132,6 +181,11 @@ class ToolRegistry:
         entry = self._tools.get(tool_name)
         return entry[1] if entry else None
 
+    def requires_approval(self, tool_name: str) -> bool:
+        """查询工具是否需要人工审批。工具不存在时返回 False。"""
+        entry = self._tools.get(tool_name)
+        return entry[2] if entry else False
+
     def has_tool(self, tool_name: str) -> bool:
         """检查工具是否已注册。"""
         return tool_name in self._tools
@@ -144,8 +198,39 @@ class ToolRegistry:
         """
         return [
             {"name": name, "permission": perm.value}
-            for name, (_, perm) in self._tools.items()
+            for name, (_, perm, _) in self._tools.items()
         ]
 
     def __repr__(self) -> str:
         return f"ToolRegistry(tools={len(self._tools)})"
+
+
+def _always_deny(tool_name: str, tool_args: dict) -> bool:
+    """默认审批回调：一律拒绝（fail-safe）。"""
+    return False
+
+
+def _wrap_with_approval(tool, approval_callback: Callable[[str, dict], bool]):
+    """用审批门包装工具：每次调用前征询回调，拒绝则返回错误串。
+
+    包装器保留原工具的 name / description / args_schema，
+    对 LLM 完全透明（schema 不变，只在执行层加门）。
+    """
+    original_name = tool.name
+    original_description = tool.description
+    original_args_schema = tool.args_schema
+
+    def _guarded(**kwargs):
+        if not approval_callback(original_name, kwargs):
+            return (
+                f"用户拒绝执行工具 '{original_name}'。\n"
+                f"请改用其他方式完成任务，或直接向用户说明情况。"
+            )
+        return tool.invoke(kwargs)
+
+    return StructuredTool.from_function(
+        func=_guarded,
+        name=original_name,
+        description=original_description,
+        args_schema=original_args_schema,
+    )

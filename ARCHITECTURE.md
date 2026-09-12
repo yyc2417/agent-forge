@@ -8,7 +8,7 @@
 
 1. **状态图驱动**：所有 Agent 行为通过 LangGraph StateGraph 建模——节点是纯函数，条件边是决策点，状态通过 reducer 自动合并
 2. **消息解耦**：Agent 之间通过 Message Bus（发布-订阅）通信，发送方不知道接收方是谁，支持零成本扩展新 Agent
-3. **分层记忆**：短期记忆（滑动窗口 + 摘要压缩）控制上下文长度，长期记忆（向量检索）跨会话持久化
+3. **分层记忆**：短期记忆（滑动窗口 + 摘要压缩）控制上下文长度，长期记忆（JSON 键值 + 关键词检索）跨会话持久化
 4. **全链路可观测**：Bus 事件 + 生命周期 Hooks + Token 成本追踪，每一步决策、每次工具调用都可追溯
 
 ---
@@ -21,9 +21,9 @@ agent_forge/
 │   └── providers.py      # DeepSeek（兼容 OpenAI SDK）
 ├── tools/                # 工具系统
 │   ├── file_tools.py     # read_file / write_file
-│   ├── shell_tools.py    # run_shell（黑名单 + 超时 + 截断）
+│   ├── shell_tools.py    # run_shell（黑名单 + 沙箱 + 超时 + 截断）
 │   ├── search_tools.py   # grep_search
-│   └── registry.py       # ToolRegistry（三级权限：READ/WRITE/EXECUTE）
+│   └── registry.py       # ToolRegistry（三级权限：READ/WRITE/EXECUTE + 审批门）
 ├── bus/                  # 消息总线
 │   ├── message.py        # Message dataclass + MessageIntent 枚举
 │   ├── bus.py            # MessageBus（pub/sub + 拦截器链 + 消息历史）
@@ -39,7 +39,7 @@ agent_forge/
 ├── dashboard/            # 可视化 Dashboard
 │   ├── collector.py      # BusCollector（订阅 Bus 采集事件，线程安全）
 │   └── app.py            # Streamlit 应用（4 Tab：任务/消息流/状态/成本）
-├── hooks.py              # HookManager（5 个标准事件钩子）
+├── hooks.py              # HookManager（4 个标准事件钩子）
 ├── cost.py               # CostTracker（按 Agent 维度汇总 Token 成本）
 └── utils.py              # safe_print / print_separator / print_info
 ```
@@ -157,7 +157,6 @@ Agent 通过 Bus 发布 EVENT 消息，payload 中的 `event_type` 标识事件�
 | `post_llm_call` | LLM 调用后 | `agent`, `response` |
 | `pre_tool_use` | 工具执行前 | `agent`, `tool_name`, `tool_args` |
 | `post_tool_use` | 工具执行后 | `agent`, `tool_name`, `output` |
-| `on_message_received` | 收到 Bus 消息 | `agent`, `message` |
 
 ---
 

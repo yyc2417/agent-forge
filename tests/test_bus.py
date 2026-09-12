@@ -1,6 +1,12 @@
 """MessageBus 单元测试。"""
 
-from agent_forge.bus import LoggingInterceptor, Message, MessageIntent, MessageInterceptor
+from agent_forge.bus import (
+    LoggingInterceptor,
+    Message,
+    MessageBus,
+    MessageIntent,
+    MessageInterceptor,
+)
 
 
 class TestMessageBus:
@@ -124,3 +130,63 @@ class TestInterceptor:
         bus.add_interceptor(Second())
         bus.publish(Message(role="a", intent=MessageIntent.EVENT))
         assert order == ["first", "second"]
+
+    def test_interceptor_exception_isolated(self):
+        """修复验证：单个拦截器异常不再炸掉整个 publish。"""
+        from agent_forge.bus import MessageBus
+
+        bus = MessageBus()
+
+        class Exploding(MessageInterceptor):
+            def intercept(self, message):
+                raise RuntimeError("boom")
+
+        bus.add_interceptor(Exploding())
+        received = []
+        bus.subscribe("*", lambda msg: received.append(msg))
+        bus.publish(Message(role="a", intent=MessageIntent.EVENT))
+        # 拦截器挂了，但订阅者仍收到消息（拦截器被跳过）
+        assert len(received) == 1
+
+
+class TestHistorySemantics:
+    """消息历史语义：limit 边界 + 深拷贝 + 有界滚动。"""
+
+    def test_limit_zero_returns_empty(self):
+        """修复验证：limit=0 返回空列表（旧版 [-0:] 意外返回全部）。"""
+        bus = MessageBus()
+        for i in range(5):
+            bus.publish(Message(role="a", intent=MessageIntent.EVENT))
+        assert bus.get_history(limit=0) == []
+
+    def test_limit_none_returns_all(self):
+        bus = MessageBus(history_limit=100)
+        for i in range(60):
+            bus.publish(Message(role="a", intent=MessageIntent.EVENT))
+        assert len(bus.get_history(limit=None)) == 60
+
+    def test_default_limit_keeps_latest(self):
+        bus = MessageBus()
+        for i in range(10):
+            bus.publish(Message(role="a", intent=MessageIntent.EVENT))
+        history = bus.get_history(limit=3)
+        assert len(history) == 3
+        assert history[-1].payload == {}
+
+    def test_deep_copy_protects_history(self):
+        """修复验证：修改返回消息的嵌套 payload 不再穿透 _history。"""
+        bus = MessageBus()
+        bus.publish(Message(role="a", intent=MessageIntent.EVENT,
+                            payload={"nested": {"v": 1}}))
+        history = bus.get_history(limit=None)
+        history[0].payload["nested"]["v"] = 999
+        fresh = bus.get_history(limit=None)
+        assert fresh[0].payload["nested"]["v"] == 1
+
+    def test_history_bounded(self):
+        """修复验证：_history 有界滚动，不无限增长。"""
+        bus = MessageBus(history_limit=10)
+        for i in range(50):
+            bus.publish(Message(role="a", intent=MessageIntent.EVENT))
+        assert len(bus._history) == 10
+        assert len(bus.get_history(limit=None)) == 10

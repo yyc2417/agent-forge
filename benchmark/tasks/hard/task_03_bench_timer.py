@@ -11,9 +11,9 @@ TASK = {
 }
 
 
-def judge(agent_output: str) -> bool:
+def judge(agent_output: str, work_dir: Path) -> bool:
     """自定义评判：文件存在 + 包含 time 导入 + Markdown 表格。"""
-    timer_file = Path("benchmark_timer.py")
+    timer_file = work_dir / "benchmark_timer.py"
     if not timer_file.exists():
         return False
 

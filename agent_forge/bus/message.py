@@ -48,7 +48,8 @@ class MessageIntent(str, Enum):
     """消息意图 —— 标识这条消息"想干什么"。
 
     为什么用 str + Enum 双继承？
-    - str: 让枚举值可以直接 JSON 序列化（str(MessageIntent.REQUEST) == "request"）
+    - str: 让枚举值可以直接 JSON 序列化（MessageIntent.REQUEST.value == "request"；
+      注意 Python 3.11+ 下 str() 返回 "MessageIntent.REQUEST"，序列化请用 .value）
     - Enum: 提供类型安全，IDE 自动补全，防止拼写错误
 
     五种意图覆盖了 Agent 协作的主要场景：
@@ -114,7 +115,7 @@ class Message:
 
     # ── 必填字段 ──
     role: str
-    intent: MessageIntent
+    intent: MessageIntent | str  # from_dict 传入 str，__post_init__ 转换
     payload: dict[str, Any] = field(default_factory=dict)
 
     # ── 可选字段 ──

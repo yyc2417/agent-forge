@@ -120,10 +120,10 @@ class MetricsCollector:
             summary = cost_tracker.get_summary()
             llm_calls = sum(s["calls"] for s in summary.values())
 
-        # 从 Bus 提取消息数
+        # 从 Bus 提取消息数（limit=None 表示不限制条数）
         messages_exchanged = 0
         if bus:
-            messages_exchanged = len(bus.get_history(limit=0))
+            messages_exchanged = len(bus.get_history(limit=None))
 
         return TaskMetrics(
             task_id=self._task_id,
@@ -187,7 +187,9 @@ def aggregate_runs(runs: list[TaskMetrics]) -> TaskMetrics:
         agent_count=base.agent_count,
         messages_exchanged=base.messages_exchanged,
         output=best_output,
-        errors=[],
+        # 聚合不丢错误信息：保留各次运行的诊断线索（旧版固定置空，
+        # 排查问题时"跑了 3 次都失败但看不到原因"）
+        errors=sorted({e for r in runs for e in r.errors}),
     )
 
 
@@ -226,12 +228,6 @@ class BenchmarkSummary:
                 "avg_time_ms": avg_time,
                 "avg_tokens": avg_tokens,
             }
-
-        def _by_difficulty(metrics: list[TaskMetrics]) -> dict:
-            groups: dict[str, list[TaskMetrics]] = {}
-            for m in metrics:
-                groups.setdefault(m.difficulty, []).append(m)
-            return {d: _group_stats(ms) for d, ms in groups.items()}
 
         return {
             "single": _group_stats(single_metrics),

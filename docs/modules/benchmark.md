@@ -66,12 +66,22 @@ benchmark/
 
 每个任务在独立的临时目录中运行：
 - `tempfile.mkdtemp()` 创建临时目录
-- `os.chdir()` 切换工作目录（`threading.Lock` 保护）
-- 任务结束后恢复 cwd 并删除临时目录
+- 任务在 worker 线程中执行，线程内 `set_sandbox_root(work_dir)`
+  把所有文件工具锚定到本任务的临时目录（线程局部，并发安全）
+- 不再使用 `os.chdir()`——旧实现的进程级 cwd 切换在任务执行期间
+  会被并发 runner 踩踏，已从根上移除
+- 任务结束后删除临时目录
 
 ### 超时控制
 
-每个任务 120 秒超时，防止卡住的任务拖垮整轮 benchmark。
+每个任务默认 120 秒超时（`task.timeout` 可覆盖），防止卡住的任务
+拖垮整轮 benchmark：
+- setup / Agent / judge / teardown 在 worker 线程中执行，
+  主线程 `join(timeout)` 等待
+- 超时则本次运行记为失败（errors 记录 `task timeout after Ns`），
+  继续下一任务
+- 线程无法被强杀：卡死的调用（如 LLM 网络挂起）会残留为 daemon
+  线程，随进程退出回收
 
 ### 可重复性
 

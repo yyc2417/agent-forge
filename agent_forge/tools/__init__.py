@@ -30,13 +30,26 @@ _default_registry.register(grep_search, ToolPermission.READ)
 _default_registry.register(write_file, ToolPermission.WRITE)
 _default_registry.register(run_shell, ToolPermission.EXECUTE)
 
-# 向后兼容：ALL_TOOLS 保持不变，从默认 Registry 导出
-ALL_TOOLS = _default_registry.get_all_tools()
-
 
 def get_default_registry() -> ToolRegistry:
     """获取默认工具注册表。"""
     return _default_registry
+
+
+def __getattr__(name: str):
+    """模块级动态属性（PEP 562）。
+
+    ALL_TOOLS 不再是 import 时的静态快照：每次通过
+    agent_forge.tools.ALL_TOOLS 属性访问都会从默认注册表实时取值，
+    动态注册的工具（如 MCP 工具）能立即出现。
+
+    注意：`from agent_forge.tools import ALL_TOOLS` 仍在 import 时刻
+    绑定值（Python 语义如此）；需要"始终最新"的场景请用
+    get_default_registry().get_all_tools()。
+    """
+    if name == "ALL_TOOLS":
+        return _default_registry.get_all_tools()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

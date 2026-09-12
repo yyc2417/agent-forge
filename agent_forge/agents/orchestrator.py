@@ -16,6 +16,13 @@
     - 普通 Agent 构建 ReAct 循环图（agent_node → tool_node → 循环）
     - Orchestrator 构建编排工作流图（decompose → execute → review → aggregate）
 
+状态模型（重要）：
+    plan 是唯一事实源——每个子任务条目携带完整产出（result 字段），
+    不再有独立的 results 字典。历史教训：旧版以 agent_type 为键存产出，
+    同一 Agent 的多个子任务（如"编码 → 修复"）互相覆盖，产出丢失；
+    且 _build_context 排除同类型前序步骤，后续步骤看不到自己上一步做了什么。
+    以 plan 为单一事实源后，产出按步骤天然隔离、按顺序可追溯。
+
 与业界的对比：
     - CrewAI：Crew 对象硬编码任务顺序，不支持动态拆解和条件回退
     - AutoGen：GroupChatManager 按轮询或选择器调度，不支持 StateGraph 建模
@@ -48,15 +55,13 @@ from agent_forge.utils import safe_print
 class OrchestratorState(TypedDict):
     """编排器的运行状态 —— 比 AgentState 丰富得多。
 
-    AgentState 只有 messages 一个字段（ReAct 循环只需要对话历史）。
-    OrchestratorState 需要追踪任务拆解、执行进度、审查结果等编排元数据。
-
     字段说明：
-    - messages: 保留 add_messages reducer，用于 Orchestrator 自身的 LLM 推理
+    - messages: 保留 add_messages reducer（BaseAgent 接口要求，编排图不使用）
     - task: 用户原始任务（不可变）
-    - plan: LLM 拆解出的子任务列表（每个子任务包含 agent_type 和 description）
+    - plan: 子任务列表（唯一事实源）。每个条目：
+      {id, description, agent_type, status: pending|done|error, result: 完整产出}
     - current_step: 当前执行到第几个子任务（execute 节点递增）
-    - results: {agent_name: result} 映射，累积各 Specialist 的产出
+    - review_result: 审查门的审查意见文本（review 节点写入）
     - review_passed: 审查是否通过（review 节点设置）
     - final_output: 汇总的最终输出（aggregate 节点设置）
     - retry_count: 回退重试计数（防无限回退）
@@ -69,7 +74,7 @@ class OrchestratorState(TypedDict):
     task: str
     plan: list
     current_step: int
-    results: dict
+    review_result: str
     review_passed: bool
     final_output: str
     retry_count: int
@@ -95,7 +100,11 @@ class Orchestrator(BaseAgent):
     Attributes:
         _specialists: 可用的 Specialist Agent 字典
         _max_retries: 审查不通过时的最大回退重试次数
+        _recursion_limit: StateGraph 递归上限（大计划 + 重试循环可调高）
+        _rework_agent_type: 审查不通过时从该类型的最后一个步骤开始重跑
     """
+
+    _rework_agent_type = "coder"
 
     def __init__(
         self,
@@ -103,6 +112,7 @@ class Orchestrator(BaseAgent):
         bus: MessageBus | None = None,
         llm=None,
         max_retries: int = 2,
+        recursion_limit: int = 50,
         # ── 透传 BaseAgent 参数 ──
         memory=None,
         hooks=None,
@@ -110,6 +120,7 @@ class Orchestrator(BaseAgent):
     ):
         self._specialists = specialists
         self._max_retries = max_retries
+        self._recursion_limit = recursion_limit
 
         super().__init__(
             name="orchestrator",
@@ -127,6 +138,8 @@ class Orchestrator(BaseAgent):
 
         prompt 中列出了可用的 Specialist Agent 信息，
         让 LLM 知道有哪些角色可以分配任务。
+        注意：审查（reviewer）不作为子任务安排——审查由编排器的
+        review 节点统一执行，否则 reviewer 每轮会被调用两次。
         """
         specialist_info = "\n".join(
             f"  - {name}: {s.role}" for name, s in self._specialists.items()
@@ -144,15 +157,15 @@ class Orchestrator(BaseAgent):
 
 拆解规则：
 - 每个子任务应清晰、独立、可执行
-- 通常一个编码任务需要：coder 编码 → reviewer 审查
+- 同一角色可以被安排多个步骤（如 coder 编码 → coder 修复）
+- 【不要】安排 reviewer 审查步骤：审查由编排器在子任务全部完成后自动执行
 - 输出严格的 JSON 格式（不要添加 markdown 代码块标记）
 
 输出格式（严格遵守，直接输出 JSON）：
 {{
   "analysis": "任务分析...",
   "subtasks": [
-    {{"id": 1, "agent": "coder", "description": "具体任务描述"}},
-    {{"id": 2, "agent": "reviewer", "description": "具体任务描述"}}
+    {{"id": 1, "agent": "coder", "description": "具体任务描述"}}
   ]
 }}"""
 
@@ -165,6 +178,10 @@ class Orchestrator(BaseAgent):
         1. 正则提取 JSON（LLM 输出可能包含多余文本）
         2. json.loads 解析（格式可能不对）
         3. fallback 到默认的单步 coder 计划
+
+        与 BaseAgent 的 agent_node 一致，拆解调用同样触发
+        pre/post_llm_call hooks 并计入 cost_tracker——否则成本报告
+        会静默少算拆解这一步。
 
         Returns:
             包含 plan、current_step、retry_count 的状态更新。
@@ -182,12 +199,20 @@ class Orchestrator(BaseAgent):
             HumanMessage(content=f"请拆解以下任务：\n{task}"),
         ]
 
+        self._hooks.trigger("pre_llm_call", agent=self.name, messages=messages)
+
         try:
             response = self._llm.invoke(messages)
-            plan = self._parse_plan(response.content)
         except Exception as e:
             safe_print(f"  [Orchestrator] LLM 拆解异常: {e}")
             plan = self._fallback_plan(task)
+        else:
+            self._hooks.trigger("post_llm_call", agent=self.name, response=response)
+            self._record_usage(response)
+            output = response.content
+            if not isinstance(output, str):
+                output = str(output)
+            plan = self._parse_plan(output)
 
         safe_print(f"  [Orchestrator] 拆解为 {len(plan)} 个子任务:")
         for sub in plan:
@@ -196,28 +221,39 @@ class Orchestrator(BaseAgent):
 
         return {"plan": plan, "current_step": 0, "retry_count": 0}
 
+    def _record_usage(self, response) -> None:
+        """从 LLM 响应中提取 token 用量并计入成本追踪（与 base 一致）。"""
+        if self._cost_tracker and hasattr(response, "response_metadata"):
+            usage = response.response_metadata.get("token_usage", {})
+            if usage:
+                self._cost_tracker.record(
+                    agent_name=self.name,
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                )
+
     def _execute_node(self, state: OrchestratorState) -> dict:
         """执行节点：取出当前子任务，路由到对应 Specialist 执行。
 
-        每次调用只执行一个子任务（由 current_step 指定），
-        然后通过条件边 should_continue_execute 判断是否继续。
+        每次调用只执行一个子任务（由 current_step 指定），产出完整地
+        写回 plan 对应条目（plan 是唯一事实源），然后由条件边
+        should_continue_execute 判断是否继续。
 
-        关键：results 字段是覆盖式更新（非追加），
-        所以需要先复制旧 results 再合并新值。
+        两类特殊步骤不调用 Specialist：
+        - reviewer 步骤：审查由 review 节点统一执行（避免每轮调两次）
+        - 未知 agent_type：标记 error 并继续（不中断整个计划）
 
         Returns:
-            包含更新后的 plan、current_step、results 的状态更新。
+            包含更新后的 plan、current_step 的状态更新。
         """
         plan = state["plan"]
         step = state["current_step"]
-        results = dict(state.get("results", {}))  # 复制旧值
 
         if step >= len(plan):
             return {"current_step": step}
 
         subtask = plan[step]
         agent_type = subtask["agent_type"]
-        agent = self._specialists.get(agent_type)
 
         safe_print(f"\n  [Orchestrator] 步骤 {step + 1}/{len(plan)}: "
                    f"分发给 {agent_type}")
@@ -228,33 +264,39 @@ class Orchestrator(BaseAgent):
             "target_agent": agent_type,
         })
 
+        updated_plan = list(plan)
+
+        # 审查由编排器的 review 节点统一执行
+        if agent_type == "reviewer":
+            updated_plan[step] = {
+                **subtask,
+                "status": "done",
+                "result": "（审查由编排器审查门统一执行，本步骤跳过）",
+            }
+            return {"plan": updated_plan, "current_step": step + 1}
+
+        agent = self._specialists.get(agent_type)
+
         if not agent:
             safe_print(f"  [Orchestrator] 警告: 未知 Agent 类型 '{agent_type}'，跳过")
-            results[agent_type] = f"[错误] 未知 Agent 类型: {agent_type}"
-            return {
-                "current_step": step + 1,
-                "results": results,
+            updated_plan[step] = {
+                **subtask,
+                "status": "error",
+                "result": f"[错误] 未知 Agent 类型: {agent_type}",
             }
+            return {"plan": updated_plan, "current_step": step + 1}
 
-        # 构建上下文（包含前序 Agent 的产出）
-        context = self._build_context(subtask, results)
+        # 构建上下文（包含所有前序步骤的产出，含同类型步骤）
+        context = self._build_context(subtask, plan, step)
         result = self._dispatch_to_agent(agent, context)
 
-        results[agent_type] = result
-
-        # 更新 plan 中该子任务的状态
-        updated_plan = list(plan)
         updated_plan[step] = {
             **subtask,
             "status": "done",
-            "result": result[:200],
+            "result": result,
         }
 
-        return {
-            "plan": updated_plan,
-            "current_step": step + 1,
-            "results": results,
-        }
+        return {"plan": updated_plan, "current_step": step + 1}
 
     # ─── 审查节点的子方法（职责分离）──────────────────────
 
@@ -322,9 +364,14 @@ class Orchestrator(BaseAgent):
     def _parse_review_result(self, review_result: str) -> bool:
         """解析审查结果，判定是否通过。
 
-        采用双条件判定，减少 LLM 输出的模糊性导致的误判：
-        - 必须包含"通过"
-        - 不能包含"不通过"（"不通过"是"通过"的子串，单条件会误判）
+        按系统提示规定的【通过】/【不通过】标记精确匹配，方向保守：
+        - 出现【不通过】→ False（即使同时出现【通过】）
+        - 出现【通过】且无【不通过】→ True
+        - 两者皆无 → False（保守失败）
+
+        为什么不用子串判定？"未通过编译"、"无法通过审查"等否定变体
+        含"通过"字样但不含"不通过"，旧的 `"通过" in and "不通过" not in`
+        判定会把它们误判为通过——质量门禁向放行方向误判是最危险的。
 
         Args:
             review_result: Reviewer Agent 的审查结果文本。
@@ -332,21 +379,28 @@ class Orchestrator(BaseAgent):
         Returns:
             True 表示审查通过，False 表示不通过。
         """
-        return "通过" in review_result and "不通过" not in review_result
+        if "【不通过】" in review_result:
+            return False
+        return "【通过】" in review_result
 
-    def _reset_execution_state(
-        self, state: OrchestratorState, results: dict
-    ) -> dict:
+    def _last_coder_result(self, plan: list) -> str:
+        """从 plan 中取最后一个已完成的重做类型步骤的产出。"""
+        for sub in reversed(plan):
+            if (sub.get("agent_type") == self._rework_agent_type
+                    and sub.get("status") == "done"):
+                return sub.get("result", "")
+        return ""
+
+    def _reset_execution_state(self, state: OrchestratorState) -> dict:
         """审查不通过时重置执行状态，让 execute 节点重新运行。
 
         智能回退策略：
-        - 找到最后一个 agent_type="coder" 的步骤，只从该步骤开始重跑
-        - 保留 coder 之前的步骤结果（如 analyst 的分析不需要重做）
+        - 找到最后一个重做类型（默认 coder）的步骤，只从该步骤开始重跑
+        - 保留之前的步骤结果（如 analyst 的分析不需要重做）
         - retry_count 递增，plan 中需要重跑的步骤重置为 pending
 
         Args:
             state: 当前 OrchestratorState。
-            results: 已收集的 Agent 产出（包含最新的 review 结果）。
 
         Returns:
             完整的状态更新 dict，供 StateGraph 合并。
@@ -354,28 +408,25 @@ class Orchestrator(BaseAgent):
         retry_count = state.get("retry_count", 0)
         plan = state.get("plan", [])
 
-        # 找到最后一个 coder 步骤的索引
-        last_coder_idx = -1
+        # 找到最后一个重做类型步骤的索引
+        last_rework_idx = -1
         for i, sub in enumerate(plan):
-            if sub.get("agent_type") == "coder":
-                last_coder_idx = i
+            if sub.get("agent_type") == self._rework_agent_type:
+                last_rework_idx = i
 
-        # 如果找到 coder 步骤，从该步骤开始重跑；否则从头开始
-        restart_from = last_coder_idx if last_coder_idx >= 0 else 0
+        # 如果找到，从该步骤开始重跑；否则从头开始
+        restart_from = last_rework_idx if last_rework_idx >= 0 else 0
 
         # 只重置需要重跑的步骤
-        reset_plan = []
-        for i, sub in enumerate(plan):
-            if i >= restart_from:
-                reset_plan.append({**sub, "status": "pending", "result": ""})
-            else:
-                reset_plan.append(sub)  # 保留已完成的步骤
+        reset_plan = [
+            {**sub, "status": "pending", "result": ""} if i >= restart_from else sub
+            for i, sub in enumerate(plan)
+        ]
 
         return {
             "review_passed": False,
             "current_step": restart_from,
             "retry_count": retry_count + 1,
-            "results": results,
             "plan": reset_plan,
         }
 
@@ -388,14 +439,14 @@ class Orchestrator(BaseAgent):
         - _should_skip_review: 前置检查（无产出/无 Reviewer → 跳过）
         - _should_force_pass: 重试控制（达到上限 → 强制通过）
         - _call_reviewer: Agent 调用（构建 prompt + 调用 + Bus 事件）
-        - _parse_review_result: 结果判定（双条件：通过/不通过）
+        - _parse_review_result: 结果判定（标记精确匹配）
         - _reset_execution_state: 状态重置（回退到 execute 重新运行）
 
         Returns:
-            包含 review_passed 的状态更新 dict。
+            包含 review_passed、review_result 的状态更新 dict。
         """
-        results = dict(state.get("results", {}))
-        coder_output = results.get("coder", "")
+        plan = state.get("plan", [])
+        coder_output = self._last_coder_result(plan)
         reviewer = self._specialists.get("reviewer")
         retry_count = state.get("retry_count", 0)
 
@@ -422,21 +473,23 @@ class Orchestrator(BaseAgent):
         passed = self._parse_review_result(review_result)
 
         safe_print(f"  [Orchestrator] 审查结果: {'【通过】' if passed else '【不通过】'}")
-        results["review"] = review_result
 
         if passed:
-            return {"review_passed": True, "results": results}
-        else:
-            return self._reset_execution_state(state, results)
+            return {"review_passed": True, "review_result": review_result}
+
+        update = self._reset_execution_state(state)
+        update["review_result"] = review_result
+        return update
 
     def _aggregate_node(self, state: OrchestratorState) -> dict:
-        """汇总节点：将所有 Specialist 的产出汇总为最终报告。
+        """汇总节点：按 plan 顺序将所有步骤产出汇总为最终报告。
 
         Returns:
             包含 final_output 的状态更新。
         """
-        results = state.get("results", {})
+        plan = state.get("plan", [])
         task = state["task"]
+        review_result = state.get("review_result", "")
 
         safe_print("\n  [Orchestrator] 汇总所有产出")
         self._publish_event(MessageIntent.EVENT, {
@@ -444,11 +497,27 @@ class Orchestrator(BaseAgent):
         })
 
         sections = [f"# 任务完成报告\n\n原始任务: {task}\n"]
-        for agent_name, result in results.items():
-            if agent_name == "review":
-                sections.append(f"## 审查意见\n\n{result}\n")
-            else:
-                sections.append(f"## {agent_name} 的产出\n\n{result}\n")
+
+        for sub in plan:
+            label = f"步骤 {sub.get('id', '?')} [{sub.get('agent_type', '?')}]"
+            status = sub.get("status", "pending")
+            if status == "done" and sub.get("result"):
+                sections.append(f"## {label} 的产出\n\n{sub['result']}\n")
+            elif status == "error":
+                sections.append(f"## {label} 执行失败\n\n{sub.get('result', '')}\n")
+
+        if review_result:
+            sections.append(f"## 审查意见\n\n{review_result}\n")
+
+        # 如实汇报未完成的步骤，避免报告显得"全部完成"
+        pending = [s for s in plan if s.get("status") not in ("done", "error")]
+        if pending:
+            lines = "\n".join(
+                f"- 步骤 {s.get('id', '?')} [{s.get('agent_type', '?')}]: "
+                f"{s.get('description', '')}"
+                for s in pending
+            )
+            sections.append(f"## 未完成步骤\n\n以下步骤未执行完成，产出可能不完整：\n{lines}\n")
 
         final = "\n---\n".join(sections)
 
@@ -530,7 +599,8 @@ class Orchestrator(BaseAgent):
 
         与 BaseAgent.run() 的区别：
         - 初始状态不是 messages，而是 OrchestratorState
-        - recursion_limit 更高（50），因为嵌套调用 Specialist 需要更多递归
+        - recursion_limit 默认 50 且可通过 __init__ 调整
+          （大计划 + 重试循环每周期约 6 个 super-step，默认值可能不足）
         - 返回 final_output 而非最后一条 AIMessage
 
         Args:
@@ -540,7 +610,7 @@ class Orchestrator(BaseAgent):
         Returns:
             汇总后的最终报告字符串。
         """
-        default_config = {"recursion_limit": 50}
+        default_config = {"recursion_limit": self._recursion_limit}
         if config:
             default_config.update(config)
 
@@ -554,7 +624,7 @@ class Orchestrator(BaseAgent):
             "task": user_input,
             "plan": [],
             "current_step": 0,
-            "results": {},
+            "review_result": "",
             "review_passed": False,
             "final_output": "",
             "retry_count": 0,
@@ -603,10 +673,11 @@ class Orchestrator(BaseAgent):
         return self._fallback_plan(llm_output[:200])
 
     def _fallback_plan(self, task: str) -> list[dict]:
-        """兜底计划：当 LLM 拆解失败时，使用 coder → reviewer 默认流程。
+        """兜底计划：当 LLM 拆解失败时，使用单步 coder 默认流程。
 
         这是"宁可降级运行，不可崩溃"的设计原则。
-        大多数编程任务用 coder → reviewer 两步就够了。
+        只安排 coder 步骤——审查由 review 节点统一执行，
+        避免 reviewer 被调用两次。
         """
         return [
             {
@@ -616,32 +687,32 @@ class Orchestrator(BaseAgent):
                 "status": "pending",
                 "result": "",
             },
-            {
-                "id": 2,
-                "description": "审查代码质量",
-                "agent_type": "reviewer",
-                "status": "pending",
-                "result": "",
-            },
         ]
 
-    def _build_context(self, subtask: dict, results: dict) -> str:
-        """为子任务构建上下文提示（包含前序 Agent 的产出）。
+    def _build_context(self, subtask: dict, plan: list, current_step: int) -> str:
+        """为子任务构建上下文提示（包含所有前序步骤的产出）。
 
-        当执行 reviewer 任务时，需要把 coder 的产出作为上下文传入，
-        否则 reviewer 不知道要审查什么。
+        同类型前序步骤的产出同样包含——coder 第 2 步（如"修复"）
+        需要看到第 1 步写了什么。旧实现排除同类型步骤，
+        导致多步骤计划中后续步骤丢失关键上下文。
 
         Args:
             subtask: 当前子任务字典。
-            results: 已完成的 Agent 产出映射。
+            plan: 完整计划（唯一事实源）。
+            current_step: 当前步骤索引（只取之前的步骤）。
 
         Returns:
-            包含任务描述和前序产出的上下文文本。
+            包含任务描述和前序产出的上下文文本（每步截断 1500 字符）。
         """
         parts = [f"任务: {subtask['description']}"]
-        for agent_name, result in results.items():
-            if agent_name != subtask["agent_type"] and agent_name != "review":
-                parts.append(f"\n{agent_name} 的前序产出:\n{result[:1500]}")
+        for i in range(current_step):
+            prev = plan[i]
+            if prev.get("status") == "done" and prev.get("result"):
+                parts.append(
+                    f"\n步骤 {prev.get('id', '?')} "
+                    f"[{prev.get('agent_type', '?')}] 的前序产出:\n"
+                    f"{prev['result'][:1500]}"
+                )
         return "\n".join(parts)
 
     def _dispatch_to_agent(self, agent: BaseAgent, task: str) -> str:

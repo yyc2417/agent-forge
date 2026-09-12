@@ -43,9 +43,9 @@ decompose → execute → [all_done?] → review → [passed?]
 |------|------|------|
 | `messages` | `list` | LLM 推理历史（add_messages reducer） |
 | `task` | `str` | 用户原始任务 |
-| `plan` | `list` | SubTask 列表（LLM 拆解结果） |
+| `plan` | `list` | SubTask 列表（唯一事实源，每条携带完整产出） |
 | `current_step` | `int` | 当前执行到第几个子任务 |
-| `results` | `dict` | `{agent_name: result}` 映射 |
+| `review_result` | `str` | 审查门的审查意见文本 |
 | `review_passed` | `bool` | 审查是否通过 |
 | `final_output` | `str` | 最终汇总报告 |
 | `retry_count` | `int` | 回退重试计数 |

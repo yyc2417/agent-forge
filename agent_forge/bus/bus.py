@@ -10,9 +10,11 @@
     - 优点：解耦（发送方不知道接收方是谁），易扩展（新 Agent 只需订阅）
     - 缺点：增加了一层中间件，调试时需要看 Bus 的路由逻辑
 
-    我们选择 Pub/Sub，因为多 Agent 系统的核心挑战是"谁该处理这个任务"——
-    这个决策不应该硬编码在发送方中，而应该由消息内容动态决定。
-    Pub/Sub 天然支持这种"按内容路由"的模式。
+    我们选择 Pub/Sub，因为多 Agent 系统需要解耦：发送方只管发布，
+    订阅方按事件的意图/发送方角色自行接收。注意如实说明当前的路由
+    能力：事件键是 intent.{x} / role.{发送方} / * 三个维度，协议中
+    没有"收件人"字段，因此是"按发送方与意图的广播"，不是按消息
+    内容的定向投递（点对点路由记入 ADR-002 未来方向）。
 
     类比：
     - 点对点 ≈ 打电话（必须知道对方号码）
@@ -39,7 +41,7 @@
 
 import copy
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Callable
 
 from agent_forge.utils import safe_print
@@ -139,14 +141,15 @@ class MessageBus:
         - 或升级为 asyncio.Queue + async handler
     """
 
-    def __init__(self) -> None:
+    def __init__(self, history_limit: int = 1000) -> None:
         # 订阅表：event_type → [handler, ...]
         # 同一个 event_type 可以有多个 handler（一对多广播）
         self._subscribers: dict[str, list[MessageHandler]] = defaultdict(list)
 
         # 消息历史：所有已发布消息的有序记录
-        # 用于 Dashboard 展示、消息回放、Agent 回顾历史
-        self._history: list[Message] = []
+        # 用于 Dashboard 展示、消息回放、Agent 回顾历史。
+        # deque(maxlen=N) 有界滚动：长时间运行不会无上限增长吃光内存
+        self._history: deque[Message] = deque(maxlen=history_limit)
 
         # 拦截器链：按添加顺序执行
         self._interceptors: list[MessageInterceptor] = []
@@ -191,11 +194,19 @@ class MessageBus:
         self._history.append(message)
 
         # 2. 拦截器链
+        # 与 handler/hook 一致的容错契约：单个拦截器异常只打日志，
+        # 不让 publish（乃至 agent.run）整体崩溃
         current_message: Message | None = message
         for interceptor in self._interceptors:
             if current_message is None:
                 return  # 被拦截器阻断
-            current_message = interceptor.intercept(current_message)
+            try:
+                current_message = interceptor.intercept(current_message)
+            except Exception as e:
+                safe_print(
+                    f"  [BUS] 拦截器异常 "
+                    f"({type(interceptor).__name__}): {type(e).__name__}: {e}"
+                )
 
         if current_message is None:
             return
@@ -242,7 +253,7 @@ class MessageBus:
         self,
         role: str | None = None,
         intent: MessageIntent | None = None,
-        limit: int = 50,
+        limit: int | None = 50,
     ) -> list[Message]:
         """查询消息历史（支持按 role/intent 过滤）。
 
@@ -256,6 +267,8 @@ class MessageBus:
             role: 按发送方过滤（如 "coder"）。None 表示不过滤。
             intent: 按意图过滤（如 MessageIntent.REQUEST）。None 表示不过滤。
             limit: 返回消息的最大数量，取最新的 N 条。
+                   None 表示不限制；0 返回空列表（与切片语义一致，
+                   旧实现的 [-0:] 会意外返回全部历史）。
 
         Returns:
             匹配条件的消息列表，按时间顺序排列（旧的在前）。
@@ -267,9 +280,17 @@ class MessageBus:
         if intent is not None:
             filtered = [m for m in filtered if m.intent == intent]
 
-        # 取最新的 limit 条
-        # 返回浅拷贝：防止调用方修改返回的 Message 对象影响 _history 中的原始数据
-        return [copy.copy(m) for m in filtered[-limit:]]
+        # 取最新的 limit 条（None = 全部；0/负数 = 空）
+        if limit is None:
+            selected = list(filtered)
+        elif limit > 0:
+            selected = list(filtered)[-limit:]
+        else:
+            selected = []
+
+        # 返回深拷贝：防止调用方修改返回的 Message（含 payload/metadata
+        # 嵌套 dict）穿透影响 _history 中的原始数据
+        return [copy.deepcopy(m) for m in selected]
 
     def clear_history(self) -> None:
         """清空消息历史。"""

@@ -16,22 +16,28 @@
     5. 生成 Markdown 报告
 
 关键设计：
-    - 隔离执行：每个任务用临时目录，防止前一个任务的副作用影响后续
-    - 超时控制：每个任务 120 秒超时（可配置）
+    - 隔离执行：每个任务用临时目录，工具沙箱（线程局部）把所有文件
+      操作锚定到该目录，防止前一个任务的副作用影响后续
+    - 超时控制：每个任务在 worker 线程中执行，超过 timeout（默认
+      120 秒）放弃本次运行并继续下一任务；线程无法被强杀，卡死的
+      调用（如 LLM 网络挂起）会残留为 daemon 线程，但不拖垮整轮
+    - 不再使用 os.chdir：旧实现的进程级 chdir + 锁只能保护切换瞬间，
+      任务执行期间并发 runner 仍会串目录；线程局部沙箱从根上消除
     - 可重复性：同一任务跑 3 次取中位数，消除 LLM 随机性
-    - cwd 切换：用 threading.Lock 保护 os.chdir，任务结束后恢复
 """
 
-import os
+import inspect
 import shutil
 import tempfile
 import threading
 from pathlib import Path
+from typing import Callable
 
 from agent_forge.agents import BaseAgent, CoderAgent, Orchestrator, ReviewerAgent
 from agent_forge.bus import MessageBus
 from agent_forge.cost import CostTracker
 from agent_forge.tools import ALL_TOOLS
+from agent_forge.tools.sandbox import clear_sandbox_root, set_sandbox_root
 from agent_forge.utils import safe_print
 from benchmark.judge import Judge
 from benchmark.metrics import (
@@ -42,8 +48,28 @@ from benchmark.metrics import (
 from benchmark.reporter import Reporter
 from benchmark.tasks import TaskDefinition, load_all_tasks, load_quick_tasks
 
-# cwd 切换锁（防止多线程竞争）
-_cwd_lock = threading.Lock()
+# Agent 工厂：按模式创建 Agent（测试可注入假 Agent，不发真实请求）
+AgentFactory = Callable[[str, MessageBus, CostTracker], BaseAgent]
+
+
+def _call_setup(fn: Callable, work_dir: Path) -> None:
+    """调用任务 setup 函数，兼容无参与 (work_dir) 单参签名。
+
+    推荐 (work_dir) 签名：setup 需要写文件时显式接收工作目录，
+    而不是隐式依赖进程 cwd（runner 已不再 os.chdir）。
+    """
+    try:
+        params = [
+            p
+            for p in inspect.signature(fn).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+    except (TypeError, ValueError):
+        params = []
+    if len(params) >= 1:
+        fn(work_dir)
+    else:
+        fn()
 
 
 class BenchmarkRunner:
@@ -51,8 +77,10 @@ class BenchmarkRunner:
 
     Attributes:
         runs: 每个任务的重复运行次数（取中位数）。
-        timeout: 每个任务的超时时间（秒）。
+        timeout: 每个任务的默认超时时间（秒），task.timeout 优先。
         report_dir: 报告输出目录。
+        agent_factory: Agent 工厂（mode, bus, cost_tracker) -> BaseAgent。
+                       None 使用内置默认工厂。
     """
 
     def __init__(
@@ -60,10 +88,12 @@ class BenchmarkRunner:
         runs: int = 3,
         timeout: int = 120,
         report_dir: str = "benchmark/reports/latest",
+        agent_factory: AgentFactory | None = None,
     ):
         self.runs = runs
         self.timeout = timeout
         self.report_dir = report_dir
+        self._agent_factory = agent_factory
 
     def run_all(
         self,
@@ -79,6 +109,10 @@ class BenchmarkRunner:
         """
         if tasks is None:
             tasks = load_all_tasks()
+
+        if not tasks:
+            safe_print("  [Runner] 警告: 没有可运行的任务（检查 difficulty_filter 拼写或任务目录），跳过")
+            return [], [], Path(self.report_dir)
 
         safe_print(f"\n{'═' * 60}")
         safe_print(f"  AgentForge Benchmark — {len(tasks)} 个任务 × {self.runs} 次")
@@ -126,11 +160,24 @@ class BenchmarkRunner:
         task: TaskDefinition,
         mode: str,
     ) -> list[TaskMetrics]:
-        """以指定模式运行任务 runs 次。"""
+        """以指定模式运行任务 runs 次。
+
+        单次运行的基础设施异常（临时目录创建失败等）只作废该次运行，
+        不中断整轮——否则跑了数小时的任务集会因最后一个任务的偶发
+        异常全部作废。
+        """
         runs_metrics: list[TaskMetrics] = []
 
         for run_idx in range(self.runs):
-            metrics = self._run_single(task, mode, run_idx)
+            try:
+                metrics = self._run_single(task, mode, run_idx)
+            except Exception as e:
+                safe_print(f"  [Runner] 运行异常: {type(e).__name__}: {e}")
+                collector = MetricsCollector()
+                collector.start_task(task.id, task.name, task.difficulty, mode, run_idx)
+                metrics = collector.end_task(
+                    "", None, None, False, [f"runner error: {type(e).__name__}: {e}"]
+                )
             runs_metrics.append(metrics)
 
         return runs_metrics
@@ -141,107 +188,130 @@ class BenchmarkRunner:
         mode: str,
         run_index: int,
     ) -> TaskMetrics:
-        """执行一次任务运行。"""
+        """执行一次任务运行（worker 线程 + 超时保护）。
+
+        执行模型：
+        - setup / agent / judge / teardown 全部在 worker 线程中执行，
+          线程内 set_sandbox_root(work_dir) 使所有文件工具锚定到本任务的
+          临时目录（线程局部，天然并发安全，替代旧的进程级 os.chdir）
+        - 主线程 join(timeout)；超时则记录失败并继续（worker 为 daemon，
+          无法强杀，卡死的调用随进程退出回收）
+
+        Args:
+            task: 任务定义。
+            mode: "single" 或 "multi"。
+            run_index: 本次运行的序号。
+
+        Returns:
+            本次运行的 TaskMetrics。
+        """
         collector = MetricsCollector()
         collector.start_task(task.id, task.name, task.difficulty, mode, run_index)
 
-        # 创建临时工作目录
-        original_cwd = os.getcwd()
         work_dir = Path(tempfile.mkdtemp(prefix=f"af_bench_{task.id}_"))
+        timeout = task.timeout or self.timeout
 
-        try:
-            # 切换 cwd（线程安全）
-            with _cwd_lock:
-                os.chdir(work_dir)
+        outcome: dict = {
+            "agent_output": "",
+            "success": False,
+            "errors": [],
+            "cost_tracker": None,
+            "bus": None,
+        }
 
-            # setup
-            if task.setup_fn:
+        def _worker() -> None:
+            set_sandbox_root(work_dir)
+            try:
+                # setup（兼容无参与 (work_dir) 单参签名）
+                if task.setup_fn:
+                    try:
+                        _call_setup(task.setup_fn, work_dir)
+                    except Exception as e:
+                        outcome["errors"].append(f"setup failed: {e}")
+                        return
+
+                # 每次运行独立的 Bus + CostTracker
+                bus = MessageBus()
+                cost_tracker = CostTracker()
+                outcome["bus"] = bus
+                outcome["cost_tracker"] = cost_tracker
+
+                factory = self._agent_factory or self._default_agent_factory
                 try:
-                    task.setup_fn()
+                    agent = factory(mode, bus, cost_tracker)
                 except Exception as e:
-                    return collector.end_task(
-                        "", success=False, errors=[f"setup failed: {e}"]
-                    )
+                    outcome["errors"].append(f"agent factory failed: {e}")
+                    agent = None
 
-            # 创建独立的 Bus + CostTracker
-            bus = MessageBus()
-            cost_tracker = CostTracker()
+                if agent is not None:
+                    # 执行 Agent
+                    try:
+                        outcome["agent_output"] = agent.run(task.description)
+                    except Exception as e:
+                        outcome["errors"].append(f"{type(e).__name__}: {e}")
 
-            # 执行 Agent
-            agent_output = ""
-            errors: list[str] = []
+                    # Judge 评判（异常不再吞掉，进入 errors 便于归因）
+                    try:
+                        outcome["success"] = Judge.evaluate(
+                            task, outcome["agent_output"], work_dir
+                        )
+                    except Exception as e:
+                        outcome["errors"].append(f"judge error: {type(e).__name__}: {e}")
 
-            try:
-                if mode == "single":
-                    agent_output = self._run_single_agent(
-                        task, bus, cost_tracker
-                    )
-                else:
-                    agent_output = self._run_multi_agent(
-                        task, bus, cost_tracker
-                    )
-            except Exception as e:
-                errors.append(f"{type(e).__name__}: {e}")
+                # teardown
+                if task.teardown_fn:
+                    try:
+                        task.teardown_fn()
+                    except Exception as e:
+                        outcome["errors"].append(f"teardown failed: {e}")
+            except Exception as e:  # 兜底安全网：worker 内任何异常都进入 errors
+                outcome["errors"].append(f"worker error: {type(e).__name__}: {e}")
+            finally:
+                clear_sandbox_root()
 
-            # Judge 评判
-            success = False
-            try:
-                success = Judge.evaluate(task, agent_output, work_dir)
-            except Exception as e:
-                errors.append(f"judge error: {e}")
-
-            # teardown
-            if task.teardown_fn:
-                try:
-                    task.teardown_fn()
-                except Exception:
-                    pass
-
-            return collector.end_task(
-                agent_output, cost_tracker, bus, success, errors
-            )
-
-        finally:
-            # 恢复 cwd + 清理临时目录
-            with _cwd_lock:
-                os.chdir(original_cwd)
-            try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-    def _run_single_agent(
-        self,
-        task: TaskDefinition,
-        bus: MessageBus,
-        cost_tracker: CostTracker,
-    ) -> str:
-        """单 Agent 模式执行任务。"""
-        agent = BaseAgent(
-            name="solo",
-            role="全能工程师",
-            tools=ALL_TOOLS,
-            bus=bus,
-            cost_tracker=cost_tracker,
-            max_turns=10,
+        worker = threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"af-bench-{task.id}-{mode}-{run_index}",
         )
-        return agent.run(task.description)
+        worker.start()
+        worker.join(timeout)
 
-    def _run_multi_agent(
-        self,
-        task: TaskDefinition,
-        bus: MessageBus,
-        cost_tracker: CostTracker,
-    ) -> str:
-        """多 Agent 模式执行任务。"""
+        if worker.is_alive():
+            outcome["errors"].append(f"task timeout after {timeout}s")
+            outcome["success"] = False
+
+        # 清理临时目录（worker 超时残留文件句柄时删除失败，目录留给系统清理）
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+        return collector.end_task(
+            outcome["agent_output"],
+            outcome["cost_tracker"],
+            outcome["bus"],
+            outcome["success"],
+            outcome["errors"],
+        )
+
+    def _default_agent_factory(
+        self, mode: str, bus: MessageBus, cost_tracker: CostTracker
+    ) -> BaseAgent:
+        """默认 Agent 工厂：按模式创建单 Agent 或 Orchestrator。"""
+        if mode == "single":
+            return BaseAgent(
+                name="solo",
+                role="全能工程师",
+                tools=ALL_TOOLS,
+                bus=bus,
+                cost_tracker=cost_tracker,
+                max_turns=10,
+            )
         coder = CoderAgent(bus=bus, cost_tracker=cost_tracker)
         reviewer = ReviewerAgent(bus=bus, cost_tracker=cost_tracker)
-        orchestrator = Orchestrator(
+        return Orchestrator(
             specialists={"coder": coder, "reviewer": reviewer},
             bus=bus,
             cost_tracker=cost_tracker,
         )
-        return orchestrator.run(task.description)
 
     def _print_summary(
         self,
@@ -263,14 +333,17 @@ class BenchmarkRunner:
             if m_total > 0 else 0
         )
 
+        def _rate(success: int, total: int) -> str:
+            return f"{success}/{total} ({success / total:.0%})" if total > 0 else "0/0"
+
         safe_print(f"\n{'═' * 60}")
         safe_print("  Benchmark 汇总")
         safe_print(f"{'═' * 60}")
         safe_print(f"  {'指标':<16} {'单Agent':>12} {'多Agent':>12}")
         safe_print(f"  {'─' * 16} {'─' * 12} {'─' * 12}")
         safe_print(
-            f"  {'完成率':<14} {s_success}/{s_total} ({s_success / s_total:.0%}) "
-            f"{m_success}/{m_total} ({m_success / m_total:.0%})"
+            f"  {'完成率':<14} {_rate(s_success, s_total):>12} "
+            f"{_rate(m_success, m_total):>12}"
         )
         safe_print(
             f"  {'平均耗时':<12} {s_avg_time:.1f}s {m_avg_time:.1f}s"

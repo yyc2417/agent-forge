@@ -4,15 +4,17 @@
 使用纯 Python 标准库实现（pathlib + re），不依赖系统 grep 命令。
 
 安全设计：
-    - 搜索结果最多返回 50 条，防止大量匹配淹没上下文
+    - 搜索根目录经沙箱校验，越出工作区边界的路径直接拒绝
+    - 结果最多返回 50 条，防止大量匹配淹没上下文
+    - 单文件超过 1MB 跳过、最多扫描 2000 个文件，防止大型日志拖垮内存
     - 跳过二进制文件和常见的非文本目录（.git, __pycache__, .venv）
-    - 搜索范围受 path 参数限制，不会无限制遍历整个文件系统
 """
 
 import re
-from pathlib import Path
 
 from langchain_core.tools import tool
+
+from agent_forge.tools.sandbox import resolve_in_sandbox
 
 # 跳过的目录名（搜索时自动忽略）
 _SKIP_DIRS = {
@@ -23,6 +25,12 @@ _SKIP_DIRS = {
 
 # 最大返回条数
 _MAX_RESULTS = 50
+
+# 单文件读取上限（字节）：超过则跳过，防止大文件全量读入内存
+_MAX_FILE_BYTES = 1_000_000
+
+# 单次搜索最多扫描的文件数
+_MAX_FILES = 2000
 
 
 @tool
@@ -35,7 +43,7 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*.py") -> st
     Args:
         pattern: 搜索的文本模式（支持 Python 正则表达式语法）。
                  例如："def test_"、"class.*Agent"、"import.*langgraph"
-        path: 搜索的根目录，默认当前目录。
+        path: 搜索的根目录（须位于沙箱内），默认当前目录。
         file_pattern: 文件过滤 glob 模式，默认 "*.py"。
                       常用值："*.py"（Python）、"*.*"（所有文件）、"*.md"（Markdown）
 
@@ -43,7 +51,10 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*.py") -> st
         匹配结果，格式为 "文件名:行号: 匹配行内容"。
         最多返回 50 条匹配结果。无匹配时返回提示。
     """
-    search_path = Path(path)
+    search_path, sandbox_error = resolve_in_sandbox(path)
+    if sandbox_error:
+        return sandbox_error
+
     if not search_path.exists():
         return f"错误：目录 '{path}' 不存在"
 
@@ -57,6 +68,7 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*.py") -> st
 
     results: list[str] = []
     files_searched = 0
+    files_skipped = 0
 
     for file_path in search_path.rglob(file_pattern):
         # 跳过隐藏目录和常见的非文本目录
@@ -66,7 +78,17 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*.py") -> st
         if any(part.startswith(".") and part != "." for part in parts):
             continue
 
+        if files_searched >= _MAX_FILES:
+            break
         files_searched += 1
+
+        # 大文件跳过：全量读入会拖垮内存
+        try:
+            if file_path.stat().st_size > _MAX_FILE_BYTES:
+                files_skipped += 1
+                continue
+        except OSError:
+            continue
 
         try:
             lines = file_path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -91,11 +113,13 @@ def grep_search(pattern: str, path: str = ".", file_pattern: str = "*.py") -> st
                         + "\n".join(results)
                     )
 
+    skipped_note = f"，跳过 {files_skipped} 个超大文件" if files_skipped else ""
+
     if not results:
-        return f"搜索 '{pattern}'（已搜索 {files_searched} 个文件）：无匹配"
+        return f"搜索 '{pattern}'（已搜索 {files_searched} 个文件{skipped_note}）：无匹配"
 
     return (
-        f"搜索 '{pattern}'（已搜索 {files_searched} 个文件）\n"
+        f"搜索 '{pattern}'（已搜索 {files_searched} 个文件{skipped_note}）\n"
         f"找到 {len(results)} 条匹配：\n"
         + "\n".join(results)
     )

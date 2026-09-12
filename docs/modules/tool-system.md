@@ -66,7 +66,7 @@ result = grep_search.invoke({"pattern": "class.*Agent", "path": ".", "file_patte
 
 ## 生命周期 Hooks
 
-### 5 个标准事件
+### 4 个标准事件
 
 | 事件 | 触发时机 | kwargs |
 |------|----------|--------|
@@ -74,7 +74,7 @@ result = grep_search.invoke({"pattern": "class.*Agent", "path": ".", "file_patte
 | `post_llm_call` | LLM 调用后 | agent, response |
 | `pre_tool_use` | 工具执行前 | agent, tool_name, tool_args |
 | `post_tool_use` | 工具执行后 | agent, tool_name, output |
-| `on_message_received` | 收到 Bus 消息 | agent, message |
+
 
 ### API
 
