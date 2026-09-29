@@ -92,13 +92,14 @@ Hooks 让外部代码能在 Agent 执行过程中"插入"逻辑，而不需要�
 
 ### Agent A 产生的中间结果，Agent B 怎么高效获取？
 
-当前方案：通过 OrchestratorState.results 传递（Orchestrator 手动把 A 的输出拼入 B 的 prompt）。
+当前方案：plan 条目是唯一事实源——`OrchestratorState.plan` 每条携带 `{id, description, agent_type, status, result}`，Orchestrator 执行下一步时把上一步产出拼入该 Agent 的 prompt。
 这适合顺序执行的工作流。如果是并行执行，需要更复杂的共享机制（如 SharedMemory 对象）。
+（**2026-09 校准**：早期设想的独立 `results` 字段未采用；顺序执行架构见 ADR-003。）
 
 ### 什么时候应该让 Agent "忘记"？
 
 - 短期记忆：超过滑动窗口的消息自动被压缩为摘要（信息损失换 token 节省）
-- 长期记忆：Agent 可以显式调用 delete 工具删除过时信息
+- 长期记忆：可通过 recall_memory / list_memories 审视过时信息（**2026-09 校准**：`create_memory_tools` 实际只暴露 store/recall/list 三个工具，delete 未开放给 Agent——防止 Agent 自作主张删除记忆）
 - 会话切换：新建会话时，之前的对话上下文不自动带入
 
 ---
@@ -112,4 +113,4 @@ Hooks 让外部代码能在 Agent 执行过程中"插入"逻辑，而不需要�
 
 ---
 
-> **最后更新**：2026-06-12
+> **最后更新**：2026-06-12（2026-09-29 校准状态传递与记忆工具注记）

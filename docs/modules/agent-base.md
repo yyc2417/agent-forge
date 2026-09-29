@@ -1,6 +1,6 @@
 # Agent 基类设计
 
-> **状态**：阶段 1已实现 | **最后更新**：2026-06-07
+> **状态**：阶段 1已实现 | **最后更新**：2026-06-07（2026-09-29 校准：循环保护与安全防线的数字已对齐当前代码，9 月增补的沙箱/MCP 见 ADR-004/005）
 
 ---
 
@@ -76,17 +76,17 @@ BaseAgent 封装了 ReAct 循环的完整实现，从 phase0_demo Step 3 提取�
 
 ---
 
-### 决策 3：安全第一 —— Shell 工具黑名单
+### 决策 3：安全第一 —— Shell 工具纵深防御
 
 **为什么**：不能假设 LLM 永远不会调用危险命令。黑名单是纵深防御的第一层：
 
 ```
-黑名单（本工具） → 超时保护（30s） → 输出截断（10K chars）
-       ↑                ↑                    ↑
-   防破坏操作        防死循环/卡死        防上下文溢出
+黑名单（子串+正则） → 沙箱 cwd（threading.local） → 超时保护（30s） → 输出截断（10K chars）
+       ↑                    ↑                      ↑                ↑
+   防破坏操作          防路径越界/误删          防死循环/卡死       防上下文溢出
 ```
 
-这不是最终的安全方案——生产环境还需要 Docker sandbox 和权限系统（阶段 3 Tool System 会涉及）。
+沙箱与 `.env*` 敏感文件拦截于 2026-09 增补（`tools/sandbox.py`，详见 ADR-004）。这不是最终的安全方案——黑名单存在绕过空间（如 `python -c "import shutil; ..."`），生产环境仍需容器级隔离。
 
 ---
 
@@ -94,10 +94,10 @@ BaseAgent 封装了 ReAct 循环的完整实现，从 phase0_demo Step 3 提取�
 
 | 保护层 | 机制 | 位置 |
 |--------|------|------|
-| StateGraph 级 | `recursion_limit=10~15` | `agent.invoke(config={...})` |
-| 业务逻辑级 | `ai_count > 5 → 强制终止` | `should_continue()` |
+| StateGraph 级 | `recursion_limit = max_turns × 3 + 5`（默认 5×3+5=20） | `agent.invoke(config={...})` |
+| 业务逻辑级 | 最后一条 HumanMessage 之后的 AIMessage 计数 > `max_turns`（默认 5）→ 强制终止 | `should_continue()` |
 
-单靠 `recursion_limit` 不够：如果 Agent 在一个"不需要调工具但反复思考"的循环里，`recursion_limit` 不会触发（因为没有新增节点）。业务逻辑级的保护可以兜底。
+`recursion_limit` 是 LangGraph 的进程级保险丝，但无法区分终止原因；业务逻辑级的保护能给出明确终止原因（`max_turns` / `tool_loop` / `consecutive_failures` / `llm_error`），并触发结构化兜底输出。此外还有同参调用拦截（相同 `(tool, args)` 连续 3 次即拦截）与连续工具失败熔断（阈值 3），构成完整的死循环兜底四件套。
 
 ---
 
@@ -107,8 +107,9 @@ BaseAgent 封装了 ReAct 循环的完整实现，从 phase0_demo Step 3 提取�
 |----|----------|
 | ~~阶段 1~~ | ~~Agent 基类 + Message Bus~~ ✅ 已完成 |
 | ~~阶段 2~~ | ~~Orchestrator Agent——多 Agent 编排~~ ✅ 已完成 |
-| 阶段 3 | Memory 系统接入——跨轮次上下文保持 |
-| 阶段 4 | 与 Dashboard 集成——实时查看 Agent 状态和消息流 |
+| ~~阶段 3~~ | ~~Memory 系统接入——跨轮次上下文保持~~ ✅ 已完成 |
+| ~~阶段 4~~ | ~~与 Dashboard 集成——实时查看 Agent 状态和消息流~~ ✅ 已完成 |
+| 2026-09 增补 | 死循环兜底四件套、工具沙箱与 `.env` 保护、MCP 工具生态（见 ADR-004/005） |
 
 ---
 
@@ -124,4 +125,4 @@ BaseAgent 封装了 ReAct 循环的完整实现，从 phase0_demo Step 3 提取�
 
 ---
 
-> **最后更新**：2026-06-07
+> **最后更新**：2026-09-29

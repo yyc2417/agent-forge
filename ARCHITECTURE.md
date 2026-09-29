@@ -23,6 +23,7 @@ agent_forge/
 │   ├── file_tools.py     # read_file / write_file
 │   ├── shell_tools.py    # run_shell（黑名单 + 沙箱 + 超时 + 截断）
 │   ├── search_tools.py   # grep_search
+│   ├── sandbox.py        # 线程局部工作区沙箱（路径越界拒绝）
 │   ├── registry.py       # ToolRegistry（三级权限：READ/WRITE/EXECUTE + 审批门）
 │   └── mcp_tools.py      # MCP 工具生态接入（可选，客户端侧）
 ├── bus/                  # 消息总线
@@ -30,8 +31,9 @@ agent_forge/
 │   ├── bus.py            # MessageBus（pub/sub + 拦截器链 + 消息历史）
 │   └── interceptors.py   # HumanApprovalInterceptor
 ├── agents/               # Agent 抽象层
-│   ├── base.py           # BaseAgent（ReAct 循环 + Bus 集成 + Hooks + CostTracker）
-│   ├── specialists.py    # CoderAgent / ReviewerAgent
+│   ├── base.py           # BaseAgent（ReAct 循环 + Bus 集成 + Hooks + CostTracker
+│   │                     #   + 死循环兜底四件套：max_turns 上限/同参拦截/失败熔断/兜底输出）
+│   ├── specialists.py    # CoderAgent / ReviewerAgent / AnalystAgent / WriterAgent
 │   └── orchestrator.py   # Orchestrator（Plan-and-Execute + 审查回退）
 ├── memory/               # 记忆系统
 │   ├── short_term.py     # ShortTermMemory（滑动窗口 + LLM 摘要压缩）
@@ -39,10 +41,11 @@ agent_forge/
 │   └── session.py        # SessionManager（自动保存/加载）
 ├── dashboard/            # 可视化 Dashboard
 │   ├── collector.py      # BusCollector（订阅 Bus 采集事件，线程安全）
-│   └── app.py            # Streamlit 应用（4 Tab：任务/消息流/状态/成本）
+│   ├── app.py            # Streamlit 应用（4 Tab：任务/消息流/状态/成本）
+│   └── approval.py       # 人工审批门（HITL：run_shell 执行前批准/拒绝）
 ├── hooks.py              # HookManager（4 个标准事件钩子）
 ├── cost.py               # CostTracker（按 Agent 维度汇总 Token 成本）
-└── utils.py              # safe_print / print_separator / print_info
+└── utils.py              # safe_print / atomic_write_text / print_*
 ```
 
 ### 模块依赖关系
@@ -203,11 +206,11 @@ streamlit run agent_forge/dashboard/app.py
 |------|------|
 | 语言 | Python 3.11+ |
 | Agent 框架 | LangGraph（状态机驱动） |
-| LLM | DeepSeek（兼容 OpenAI SDK） |
+| LLM | DeepSeek V4-Flash（兼容 OpenAI SDK） |
 | 工具系统 | LangChain @tool + ToolRegistry |
 | 前端 | Streamlit |
 | 依赖管理 | uv + pyproject.toml |
 
 ---
 
-> 最后更新：2026-06-16
+> 最后更新：2026-09-29（specialists 补齐 4 个 Agent；兜底四件套与 README/AGENTS.md 统一口径）

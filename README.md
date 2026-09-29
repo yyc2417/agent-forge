@@ -74,7 +74,7 @@ graph LR
 
 | 模块 | 设计 | 关键技术 |
 |------|------|----------|
-| **Agent 抽象** | BaseAgent 模板方法模式 + 死循环兜底（循环检测/失败熔断/兜底输出） | LangGraph StateGraph, ReAct 循环 |
+| **Agent 抽象** | BaseAgent 模板方法模式 + 死循环兜底四件套（max_turns 上限/同参调用拦截/失败熔断/结构化兜底输出） | LangGraph StateGraph, ReAct 循环 |
 | **消息总线** | Pub/Sub 发布-订阅，Agent 间解耦通信 | 多维路由（intent/role/wildcard）, 拦截器链 |
 | **编排引擎** | Plan-and-Execute + 审查回退的混合模式 | 条件边, 状态机, LLM 任务拆解 |
 | **分层记忆** | 短期（滑动窗口+摘要压缩）+ 长期（JSON 持久化）+ 会话管理 | 自动保存/加载 |
@@ -104,7 +104,7 @@ cp .env.example .env
 # 2. 安装依赖
 uv pip install -e .
 
-# 3. 运行 Demo（每个 Demo 都是三步渐进式：--step 1/2/3）
+# 3. 运行 Demo（phase0~6 均为三步渐进式：--step 1/2/3；workflow 演示直接运行）
 python demos/phase0_agent_demo.py --step 2   # 单 Agent ReAct 循环
 python demos/phase2_agent_demo.py --step 3   # Orchestrator 多 Agent 编排
 python demos/phase4_demo.py --step 3         # Streamlit Dashboard
@@ -138,12 +138,14 @@ agent_forge/                  # 核心库
 ├── tools/                    # 工具系统
 │   ├── registry.py           #   ToolRegistry（三级权限 + 审批门）
 │   ├── file_tools.py         #   read_file / write_file
-│   ├── shell_tools.py        #   run_shell（黑名单 + 沙箱 + 超时）
+│   ├── shell_tools.py        #   run_shell（黑名单 + 超时 + 截断）
 │   ├── search_tools.py       #   grep_search
+│   ├── sandbox.py            #   线程局部工作区沙箱（路径越界拒绝）
 │   ├── mcp_tools.py          #   MCP 工具生态接入（可选 [mcp] extra）
 ├── dashboard/                # 可视化
 │   ├── collector.py          #   BusCollector（线程安全事件采集）
-│   └── app.py                #   Streamlit 4-Tab Dashboard
+│   ├── app.py                #   Streamlit 4-Tab Dashboard
+│   └── approval.py           #   人工审批门（run_shell 执行前批准/拒绝）
 ├── hooks.py                  # 生命周期 Hooks（4 个标准事件）
 └── cost.py                   # Token 成本追踪
 
@@ -154,7 +156,7 @@ benchmark/                    # 量化评测框架
 ├── reporter.py               #   Markdown 报告生成
 └── tasks/                    #   20 个标准任务（8 easy + 8 medium + 4 hard）
 
-tests/                        # 单元测试（190+ 用例 + GitHub Actions CI）
+tests/                        # 单元测试（202 个用例 + GitHub Actions CI）
 demos/                        # 渐进式 Demo + 多场景工作流
 docs/                         # 模块文档 + ADR + 学习笔记
 ```
@@ -166,7 +168,7 @@ docs/                         # 模块文档 + ADR + 学习笔记
 | Agent 框架 | LangGraph（状态图驱动） |
 | LLM | DeepSeek V4-Flash（兼容 OpenAI 格式） |
 | 可视化 | Streamlit Dashboard |
-| 测试 | pytest（190+ 用例）+ GitHub Actions CI |
+| 测试 | pytest（202 个用例）+ GitHub Actions CI |
 | Lint | ruff |
 | 依赖管理 | uv + pyproject.toml |
 
@@ -177,7 +179,7 @@ docs/                         # 模块文档 + ADR + 学习笔记
 uv pip install -e ".[mcp]"
 python demos/phase6_mcp_demo.py --step 1
 
-# 快速测试（无 LLM 调用，~4 秒）
+# 快速测试（无 LLM 调用，~8 秒）
 pytest tests/ -m "not slow" -v
 
 # 全量测试（含真实 API 调用）

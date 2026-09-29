@@ -2,7 +2,7 @@
 
 > **状态**：✅ 阶段 4已完成
 > **代码位置**：`agent_forge/dashboard/`
-> **最后更新**：2026-06-16
+> **最后更新**：2026-09-29（校准 get_messages/get_events 语义，补 9 月增补的 HITL 审批门与结果信箱）
 
 ---
 
@@ -25,7 +25,8 @@ MessageBus ("*" 通配符)
     ▼
 BusCollector（数据采集层，线程安全）
     │
-    ├── get_messages()      → Tab 2: 消息流时间线
+    ├── get_messages()      → 全部消息（含 EVENT）
+    ├── get_events()        → 事件时间线（仅 EVENT intent）
     ├── get_agent_states()  → Tab 3: Agent 状态面板
     └── get_stats()         → Tab 1/4: 统计 + 成本
     │
@@ -94,6 +95,7 @@ st.session_state.thread         # threading.Thread 实例
 st.session_state.task_result    # 任务最终结果
 st.session_state.task_error     # 任务错误信息
 st.session_state.auto_refresh   # 是否自动刷新
+st.session_state.approval_broker # HITL 审批信箱（ApprovalBroker，超时 300s 自动拒绝）
 ```
 
 ### 自动刷新机制
@@ -115,14 +117,22 @@ if st.session_state.auto_refresh and thread.is_alive():
 _run_task 内部：
     1. 创建 Bus + LoggingInterceptor
     2. collector.attach(bus)
-    3. 创建 Orchestrator + Specialists
+    3. 创建 Orchestrator + Specialists（run_shell 经 ApprovalBroker 审批）
     4. orchestrator.run(task)
-    5. 结果写入 session_state.task_result
+    5. 结果写入 _TaskRunResult 信箱（线程安全队列；
+       后台线程不直接写 session_state——Streamlit 禁止跨线程访问）
     ↓
-主线程：st.rerun() 每 2 秒刷新，展示实时数据
+主线程：st.rerun() 每 2 秒刷新，每轮从信箱取回结果写回 session_state
     ↓
 线程结束：展示最终结果
 ```
+
+### HITL 审批门（2026-09-12 增补）
+
+`run_shell` 调用前必须经人工批准（详见 [interview 修复故事](../planning/interview-stories.md) 与 commit `4a3f81e`）：
+
+- `ApprovalBroker.request(tool_name, tool_args)` 阻塞后台线程，主脚本每轮 rerun 渲染审批卡片
+- 批准/拒绝结果经线程安全信箱返回；**超时 300 秒自动拒绝**（fail-safe）
 
 ---
 
@@ -146,6 +156,7 @@ stats = collector.get_stats()
 print(f"事件数: {stats['total_events']}")
 print(f"Agent 数: {stats['agent_count']}")
 print(f"工具调用: {stats['tool_calls']}")
+# stats 还包含 total_messages / request_count / response_count / duration_seconds
 ```
 
 ---
@@ -159,4 +170,4 @@ print(f"工具调用: {stats['tool_calls']}")
 
 ---
 
-> 最后更新：2026-06-16
+> 最后更新：2026-09-29

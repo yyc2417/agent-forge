@@ -92,6 +92,11 @@ GIL 在 IO 等待时释放，所以 threading 在这个场景下是有效的。
 - 所有复杂数据通过 `BusCollector` 自己的 Lock 保护
 - 主线程通过 `collector.get_*()` 读取数据（已加锁）
 
+**校准（2026-09-29）**：上面的"后台线程直接写字符串赋值"方案后来被证明不可行——Streamlit 的
+`session_state` 绑定脚本会话，后台线程写入会抛 `NoSessionContext` 或静默丢数据。修复（commit
+`39188f7` / `4a3f81e`）：后台线程只写线程安全的 `_TaskRunResult` 结果信箱，主脚本每轮 rerun
+从信箱取回并写回 session_state（发生在主线程内）；HITL 审批同样走 `ApprovalBroker` 信箱。
+
 ---
 
 ## 思考题回答
@@ -125,4 +130,4 @@ GIL 在 IO 等待时释放，所以 threading 在这个场景下是有效的。
 
 ---
 
-> **最后更新**：2026-06-16
+> **最后更新**：2026-06-16（2026-09-29 校准线程边界注记）
