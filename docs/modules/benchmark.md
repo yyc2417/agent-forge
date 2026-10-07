@@ -160,7 +160,7 @@ benchmark/
 from benchmark import run_benchmark
 single, multi, report = run_benchmark(quick=True)
 
-# 完整模式（25 个任务，3 次运行；expert 层已建待测，实测数字以报告为准）
+# 完整模式（25 个任务，3 次运行；四层均有实测数据，expert 首测见 ADR-008）
 single, multi, report = run_benchmark()
 
 # 按难度过滤
@@ -169,7 +169,7 @@ single, multi, report = run_benchmark(difficulty="easy")
 
 ---
 
-## Expert 难度层（2026-10-07 建成，实测待执行）
+## Expert 难度层（2026-10-07 建成并首测）
 
 任务集的第四层（ADR-008），补测 v1–v3 实测未覆盖的三个假设：
 
@@ -182,6 +182,8 @@ single, multi, report = run_benchmark(difficulty="easy")
 - **Fixture**：`tasks/expert/fixture_project.py`——确定性库存管理应用（约 15 文件），预埋重复代码 / 遗留 bug / 元数据头三类种子；构建即 pytest 全绿由测试固化
 - **判据范式**（借自 AppWorld 状态单测，见业内对比）：验终态（真实跑 pytest / import 探针，只看返回码）+ 查副作用（保护文件与 pristine 逐文件比对）+ 隐藏验收测试（judge 时写入）
 - **可满足性**：每任务的金路径/失败路径零 API 测试——judge 对正确终态必过、对错误终态必拒
+
+**首测结果（2026-10-07，5 任务 × 双模式 × 3 次）**：双模式 5/5 打平、零超时零错误；多 Agent +327% 耗时 / +246% token（expert 任务判 complex，快速路径不生效，四人团队+完整审查的开销回归高位）。三假设在成功率维度均未兑现；唯一接近打平的 expert-03（1.9x token）方向符合 H1 预期但样本为 1。详见 benchmark-results.md 阶段 2 章节。
 
 ---
 

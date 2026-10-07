@@ -82,7 +82,7 @@ graph LR
 | **分层记忆** | 短期（滑动窗口+摘要压缩）+ 长期（JSON 持久化）+ 会话管理 | 自动保存/加载 |
 | **工具系统** | 三级权限模型（READ/WRITE/EXECUTE）+ 审批门 + 沙箱 + MCP 生态 | @tool 装饰器, Function Calling, MCP |
 | **可观测性** | BusCollector 事件采集 + Streamlit 4-Tab Dashboard | 线程安全, 实时刷新 |
-| **量化评测** | 25 个标准任务（8 easy + 8 medium + 4 hard + 5 expert，expert 已建待测）, 5 种评判类型, 已产出实测对比数据 | 隔离执行, 3 次取中位数 |
+| **量化评测** | 25 个标准任务（8 easy + 8 medium + 4 hard + 5 expert，四层均已实测）, 5 种评判类型 | 隔离执行, 3 次取中位数 |
 
 ## 实测数据：单 Agent vs 多 Agent
 
