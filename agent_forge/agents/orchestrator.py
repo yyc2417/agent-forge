@@ -65,6 +65,11 @@ class OrchestratorState(TypedDict):
     - review_passed: 审查是否通过（review 节点设置）
     - final_output: 汇总的最终输出（aggregate 节点设置）
     - retry_count: 回退重试计数（防无限回退）
+    - complexity: 拆解 LLM 判定的任务复杂度（"simple"/"complex"）。
+      simple 且计划只有 1 步时审查门直接放行（快速路径）——
+      2026-10-07 v2 实测显示 easy 任务上编排开销是纯负收益
+      （约 12 倍耗时），而唯一失败点（medium-07）也是过度拆解
+      导致超时。缺失/解析失败一律按 complex 保守处理。
 
     为什么 plan 用 list 而不是更复杂的 DAG？
     - 阶段 2先实现顺序执行，DAG（并行/分支）留给后续优化
@@ -78,6 +83,7 @@ class OrchestratorState(TypedDict):
     review_passed: bool
     final_output: str
     retry_count: int
+    complexity: str
 
 
 # ─── Orchestrator ─────────────────────────────────────────
@@ -159,11 +165,16 @@ class Orchestrator(BaseAgent):
 - 每个子任务应清晰、独立、可执行
 - 同一角色可以被安排多个步骤（如 coder 编码 → coder 修复）
 - 【不要】安排 reviewer 审查步骤：审查由编排器在子任务全部完成后自动执行
+- 复杂度判定：任务一步可完成（单文件读写、单一明确目标、无多阶段依赖）
+  → "simple" 且 subtasks 恰好 1 个步骤；需要多阶段、多文件协作或
+  有前后依赖 → "complex"。simple 任务会跳过审查门，不要把需要
+  质量把关的任务标为 simple
 - 输出严格的 JSON 格式（不要添加 markdown 代码块标记）
 
 输出格式（严格遵守，直接输出 JSON）：
 {{
   "analysis": "任务分析...",
+  "complexity": "simple 或 complex",
   "subtasks": [
     {{"id": 1, "agent": "coder", "description": "具体任务描述"}}
   ]
@@ -206,6 +217,7 @@ class Orchestrator(BaseAgent):
         except Exception as e:
             safe_print(f"  [Orchestrator] LLM 拆解异常: {e}")
             plan = self._fallback_plan(task)
+            complexity = "complex"
         else:
             self._hooks.trigger("post_llm_call", agent=self.name, response=response)
             self._record_usage(response)
@@ -213,13 +225,15 @@ class Orchestrator(BaseAgent):
             if not isinstance(output, str):
                 output = str(output)
             plan = self._parse_plan(output)
+            complexity = self._parse_complexity(output)
 
-        safe_print(f"  [Orchestrator] 拆解为 {len(plan)} 个子任务:")
+        safe_print(f"  [Orchestrator] 拆解为 {len(plan)} 个子任务 (complexity={complexity}):")
         for sub in plan:
             safe_print(
                 f"    - [{sub['agent_type']}] {sub['description'][:60]}")
 
-        return {"plan": plan, "current_step": 0, "retry_count": 0}
+        return {"plan": plan, "current_step": 0, "retry_count": 0,
+                "complexity": complexity}
 
     def _record_usage(self, response) -> None:
         """从 LLM 响应中提取 token 用量并计入成本追踪（与 base 一致）。"""
@@ -321,6 +335,16 @@ class Orchestrator(BaseAgent):
         if not reviewer:
             return True, "无 Reviewer，跳过审查"
         return False, ""
+
+    def _is_simple_fast_path(self, state: OrchestratorState, plan: list) -> bool:
+        """判断是否走"免审查"快速路径。
+
+        条件同时满足才放行：
+        1. 拆解 LLM 判定 complexity == "simple"
+        2. 计划恰好 1 步（多步计划即使标 simple 也走完整审查——
+           多步产出的组合质量必须把关）
+        """
+        return state.get("complexity") == "simple" and len(plan) <= 1
 
     def _should_force_pass(self, retry_count: int) -> tuple[bool, str]:
         """检查是否应该强制通过（达到最大重试次数）。
@@ -435,11 +459,12 @@ class Orchestrator(BaseAgent):
     def _review_node(self, state: OrchestratorState) -> dict:
         """审查节点：编排 Reviewer 审查 Coder 产出的完整流程。
 
-        本方法只做流程编排，具体逻辑委托给 5 个子方法：
+        本方法只做流程编排，具体逻辑委托给 6 个子方法：
         - _should_skip_review: 前置检查（无产出/无 Reviewer → 跳过）
+        - _is_simple_fast_path: 快速路径（simple 单步任务 → 免审查）
         - _should_force_pass: 重试控制（达到上限 → 强制通过）
         - _call_reviewer: Agent 调用（构建 prompt + 调用 + Bus 事件）
-        - _parse_review_result: 结果判定（标记精确匹配）
+        - _parse_review_result: 结果判定（JSON 优先，标记兜底）
         - _reset_execution_state: 状态重置（回退到 execute 重新运行）
 
         Returns:
@@ -454,6 +479,16 @@ class Orchestrator(BaseAgent):
         should_skip, skip_reason = self._should_skip_review(coder_output, reviewer)
         if should_skip:
             safe_print(f"  [Orchestrator] {skip_reason}")
+            return {"review_passed": True}
+
+        # 快速路径：拆解判定为 simple 且计划恰好 1 步 → 免审查
+        # （多步计划即使标了 simple 也不放行，防止绕过质量门）
+        if self._is_simple_fast_path(state, plan):
+            safe_print("  [Orchestrator] 简单任务（complexity=simple），跳过审查")
+            self._publish_event(MessageIntent.EVENT, {
+                "event_type": "orchestrator.review_skipped",
+                "reason": "simple fast path",
+            })
             return {"review_passed": True}
 
         # 重试检查
@@ -628,6 +663,7 @@ class Orchestrator(BaseAgent):
             "review_passed": False,
             "final_output": "",
             "retry_count": 0,
+            "complexity": "complex",  # 拆解节点会覆盖；默认保守走完整审查
         }
 
         result = self._compiled.invoke(initial_state, config=default_config)
@@ -671,6 +707,22 @@ class Orchestrator(BaseAgent):
         # 解析失败，使用兜底方案
         safe_print("  [Orchestrator] JSON 解析失败，使用默认计划")
         return self._fallback_plan(llm_output[:200])
+
+    def _parse_complexity(self, llm_output: str) -> str:
+        """解析拆解输出中的复杂度判定，缺失/非法一律按 complex（保守）。
+
+        simple 只在"计划恰好 1 步"时才生效（见 _review_node 的联动
+        判断），防止 LLM 标 simple 却规划多步时绕过质量门。
+        """
+        json_match = re.search(r'\{.*\}', llm_output, re.DOTALL)
+        if json_match:
+            try:
+                data = json.loads(json_match.group())
+                if data.get("complexity") == "simple":
+                    return "simple"
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return "complex"
 
     def _fallback_plan(self, task: str) -> list[dict]:
         """兜底计划：当 LLM 拆解失败时，使用单步 coder 默认流程。

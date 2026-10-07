@@ -222,3 +222,71 @@ class TestDecomposeObservability:
         cost = orch._cost_tracker
         assert cost.records and cost.records[0][0] == "orchestrator"
         assert cost.records[0][1] == 10 and cost.records[0][2] == 5
+
+
+# ─── 复杂度门控：simple 单步任务免审查（快速路径）──────────
+
+class TestComplexityGate:
+    """complexity=single-step 快速路径：缺失/多步一律保守走审查。"""
+
+    @staticmethod
+    def _review_state(complexity, steps=1):
+        return {
+            "task": "创建文件 hello.py",
+            "complexity": complexity,
+            "retry_count": 0,
+            "plan": [
+                {"id": i + 1, "agent_type": "coder", "description": "编码",
+                 "status": "done", "result": f"print(1)  # 第{i + 1}步"}
+                for i in range(steps)
+            ],
+        }
+
+    def test_parse_complexity_simple(self):
+        orch = Orchestrator(specialists={"coder": _StubAgent()})
+        assert orch._parse_complexity('{"complexity": "simple", "subtasks": []}') == "simple"
+
+    def test_parse_complexity_defaults_to_complex(self):
+        """缺失 / 非法 JSON / 非 simple 值 → 保守按 complex。"""
+        orch = Orchestrator(specialists={"coder": _StubAgent()})
+        assert orch._parse_complexity('{"subtasks": []}') == "complex"
+        assert orch._parse_complexity('{"complexity": " SIMPLE "}') == "complex"
+        assert orch._parse_complexity("这不是 JSON") == "complex"
+        assert orch._parse_complexity("") == "complex"
+
+    def test_simple_single_step_skips_review(self):
+        reviewer = _StubAgent(name="reviewer", outputs=["【通过】"])
+        orch = Orchestrator(specialists={"coder": _StubAgent(),
+                                         "reviewer": reviewer})
+        out = orch._review_node(self._review_state("simple", steps=1))
+        assert out["review_passed"] is True
+        assert reviewer.calls == []  # 审查未被调用
+
+    def test_simple_multi_step_still_reviews(self):
+        """标 simple 但计划多步 → 保守走完整审查（防绕过质量门）。"""
+        reviewer = _StubAgent(name="reviewer", outputs=["【通过】"])
+        orch = Orchestrator(specialists={"coder": _StubAgent(),
+                                         "reviewer": reviewer})
+        out = orch._review_node(self._review_state("simple", steps=2))
+        assert out["review_passed"] is True
+        assert len(reviewer.calls) == 1  # 审查被调用
+
+    def test_missing_complexity_reviews(self):
+        reviewer = _StubAgent(name="reviewer", outputs=["【通过】"])
+        orch = Orchestrator(specialists={"coder": _StubAgent(),
+                                         "reviewer": reviewer})
+        out = orch._review_node(self._review_state(None, steps=1))
+        assert out["review_passed"] is True
+        assert len(reviewer.calls) == 1
+
+    def test_decompose_propagates_complexity(self):
+        """拆解节点把 LLM 输出的 complexity 写入状态。"""
+        fake_llm = FakeToolCallingLLM(responses=[
+            AIMessage(content='{"analysis": "a", "complexity": "simple", '
+                              '"subtasks": [{"id": 1, "agent": "coder", '
+                              '"description": "d"}]}'),
+        ])
+        orch = Orchestrator(specialists={"coder": _StubAgent()}, llm=fake_llm)
+        out = orch._decompose_node({"task": "写一个函数"})
+        assert out["complexity"] == "simple"
+        assert len(out["plan"]) == 1
