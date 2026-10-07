@@ -6,6 +6,7 @@ TASK = {
     "name": "完整 Stack 类实现",
     "description": "实现一个完整的 Stack 类，包含 push, pop, peek, is_empty, __len__ 五个方法，要求有完整的类型注解和 docstring，将代码写入 stack.py 文件",
     "difficulty": "hard",
+    "timeout": 240,
     "judge": {
         "type": "custom",
     },

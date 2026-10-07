@@ -11,6 +11,7 @@ TASK = {
                    "创建一个增强版的 CostTracker（新增 to_json 方法支持导出为 JSON 格式），"
                    "将增强版代码写入 enhanced_cost.py",
     "difficulty": "hard",
+    "timeout": 240,
     "judge": {
         "type": "custom",
     },

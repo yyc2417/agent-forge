@@ -164,6 +164,28 @@ class TestTaskFixes:
         t2.setup(tmp_path)
         assert (tmp_path / "cost.py").exists()
 
+    def test_hard_04_setup_creates_project_tree(self, tmp_path):
+        """修复验证：hard-04 描述要求分析 agent_forge/ 目录，setup 必须先构造它。"""
+        from benchmark.tasks.hard import task_04_project_report as t4
+
+        t4.setup(tmp_path)
+        # 样例项目的 agent_forge/ 树存在，任务才可满足
+        assert (tmp_path / "agent_forge" / "agents" / "base.py").exists()
+        assert len(list(tmp_path.rglob("*.py"))) > 0
+        # 任务级超时已放宽（120s 默认预算下双模式均超时）
+        assert t4.TASK["timeout"] == 240
+        # judge 对满足条件的合成报告通过，对缺失/空报告拒绝
+        report = tmp_path / "code_stats_report.md"
+        report.write_text(
+            "# 代码统计报告\n\n共 5 个文件，base.py 7 行，2 个类，3 个函数。\n",
+            encoding="utf-8",
+        )
+        assert t4.judge("", tmp_path) is True
+
+        # 报告缺失 → 失败分支
+        report.unlink()
+        assert t4.judge("", tmp_path) is False
+
     def test_hard_01_judge_rejects_broken_syntax(self, tmp_path):
         """修复验证：hard-01 现在真的 import 验证（docstring 与实现一致）。"""
         from benchmark.tasks.hard import task_01_stack_class as t1

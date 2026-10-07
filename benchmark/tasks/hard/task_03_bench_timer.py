@@ -5,6 +5,7 @@ TASK = {
     "name": "Benchmark 计时脚本",
     "description": "创建一个 benchmark_timer.py 脚本：接受一个任务描述列表，逐个执行（用 subprocess 调用 python -c），计时每个任务的执行时间，最后输出 Markdown 表格格式的结果",
     "difficulty": "hard",
+    "timeout": 240,
     "judge": {
         "type": "custom",
     },
