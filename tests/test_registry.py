@@ -160,9 +160,19 @@ class TestSpecialistsRegistryBinding:
         assert set(names) == {"read_file", "grep_search", "write_file", "run_shell"}
 
     def test_default_tools_unchanged_without_registry(self):
-        """不传 registry 保持向后兼容（现有硬编码工具列表）。"""
-        from agent_forge.agents import WriterAgent
+        """不传 registry 保持向后兼容（现有硬编码工具列表）。
 
-        agent = WriterAgent()
-        names = [t.name for t in agent._tools]
-        assert set(names) == {"read_file", "write_file"}
+        硬编码列表必须与各自 registry 路径（bind_tools(max_permission)
+        对默认注册表的过滤结果）一致——2026-09-13 benchmark 实测发现
+        Coder/Reviewer 硬编码路径缺 grep_search，两种构造路径曾不对等。
+        """
+        from agent_forge.agents import CoderAgent, ReviewerAgent, WriterAgent
+
+        coder = [t.name for t in CoderAgent()._tools]
+        assert set(coder) == {"read_file", "grep_search", "write_file", "run_shell"}
+
+        reviewer = [t.name for t in ReviewerAgent()._tools]
+        assert set(reviewer) == {"read_file", "grep_search"}
+
+        writer = [t.name for t in WriterAgent()._tools]
+        assert set(writer) == {"read_file", "write_file"}

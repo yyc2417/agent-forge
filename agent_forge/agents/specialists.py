@@ -43,12 +43,18 @@ from agent_forge.tools import (
 
 
 class CoderAgent(BaseAgent):
-    """编码专家 —— 负责根据需求编写高质量代码。
+    """编码专家 —— 负责根据需求编写高质量的 Python 代码。
 
-    工具集：read_file + write_file + run_shell（EXECUTE 级权限）
+    工具集：read_file + grep_search + write_file + run_shell（EXECUTE 级权限）
     - read_file：阅读项目结构和已有代码，理解上下文
+    - grep_search：在项目中搜索关键模式，定位相关代码
     - write_file：将生成的代码写入文件
     - run_shell：运行代码验证正确性、执行测试
+
+    硬编码工具列表与 registry 路径（bind_tools(EXECUTE) 返回默认注册表
+    全部 4 个工具）保持一致——2026-09-13 benchmark 实测后修复：旧硬编码
+    列表缺 grep_search，导致单 Agent（ALL_TOOLS）与多 Agent 模式工具
+    不对等，easy-05（文件搜索）的对比混入了工具配置差异。
 
     与 ReviewerAgent 的分工：
     - Coder 负责"写"—— 实现功能、编写代码
@@ -64,7 +70,7 @@ class CoderAgent(BaseAgent):
             name="coder",
             role="资深 Python 工程师，擅长编写简洁、可读、健壮的代码",
             tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
-            else [read_file, write_file, run_shell],
+            else [read_file, grep_search, write_file, run_shell],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 8),
@@ -97,9 +103,10 @@ class CoderAgent(BaseAgent):
 class ReviewerAgent(BaseAgent):
     """代码审查专家 —— 负责审查代码质量并给出通过/不通过判定。
 
-    工具集：仅 read_file
+    工具集：read_file + grep_search（只读）
     - 审查者只需要"读"代码，不需要修改或执行
     - 这体现了最小权限原则：每个 Agent 只拥有完成任务所需的最小工具集
+    - grep_search 用于定位待审查代码（与 registry READ 路径一致）
 
     判定格式：
     system prompt 要求 Reviewer 首先输出【通过】或【不通过】。
@@ -120,7 +127,7 @@ class ReviewerAgent(BaseAgent):
             name="reviewer",
             role="代码审查专家，关注安全性、性能和代码风格",
             tools=registry.bind_tools(self._max_permission, approval_callback=approval_callback) if registry
-            else [read_file],
+            else [read_file, grep_search],
             bus=bus,
             llm=llm,
             max_turns=kwargs.get("max_turns", 3),
@@ -140,7 +147,9 @@ class ReviewerAgent(BaseAgent):
 
 可用工具：
 - read_file：读取代码文件内容进行审查
-注意：你只有 read_file 工具，不要尝试调用 run_shell、write_file 或其他工具。
+- grep_search：在项目中搜索关键模式，定位待审查代码
+注意：你只有 read_file 和 grep_search 两个只读工具，
+不要尝试调用 run_shell、write_file 或其他工具。
 如果任务描述中没有指定文件名，请根据上下文推断（如当前目录下的 .py 文件）。
 
 审查维度：
