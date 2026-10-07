@@ -86,15 +86,15 @@ graph LR
 
 ## 实测数据：单 Agent vs 多 Agent
 
-用框架自带的评测系统实测（20 任务 × 2 模式 × 3 次取中位数，easy/medium 任务级 120s、hard 240s 超时兜底；2026-10-07 方法学修复后的 v2 基线，修复内容见 [ADR-006](docs/adr/006-benchmark-measurement-validity.md)）：
+用框架自带的评测系统实测（20 任务 × 2 模式 × 3 次取中位数，easy/medium 任务级 120s、hard 240s 超时兜底；下表为 2026-10-07 编排优化后（v3）与优化前干净基线（v2）的同日 A/B，方法学修复见 [ADR-006](docs/adr/006-benchmark-measurement-validity.md)、优化决策见 [ADR-007](docs/adr/007-orchestrator-lowcost-optimizations.md)）：
 
-| 指标 | 单 Agent | 多 Agent |
+| 多 Agent 指标 | 优化前（v2） | 优化后（v3） |
 |------|---------|---------|
-| 成功率 | **20/20 (100%)** | 19/20 (95%) |
-| 平均耗时 | 10.5s | 54.1s |
-| 平均 Token | 19,298 | 87,337 |
+| 成功率 | 19/20 (95%) | 19/20 (95%) |
+| 平均耗时 | 54.1s | **20.9s (-61%)** |
+| 平均 Token | 87,337 | **28,712 (-67%)** |
 
-**发现：两种模式成功率接近打平，但多 Agent 在这套"单文件、目标明确"的任务集上付出约 4.5 倍 token、5.1 倍耗时**；唯一失败点（medium-07）是多 Agent 在中等任务上过度拆解导致超时。完整数据、v1/v2 对比与局限声明见 [docs/benchmark-results.md](docs/benchmark-results.md)。
+单 Agent（对照）：**20/20 (100%)**，11.9s，18,976 tokens。优化内容：复杂度门控（simple 单步任务免审查）、审查交接（Reviewer 读磁盘真实文件）、判定双通道（JSON 优先）。hard-03 上多 Agent 首次反超单 Agent（26.4s vs 34.0s）。完整数据与逐项解读见 [docs/benchmark-results.md](docs/benchmark-results.md)。
 
 ## 快速开始
 
