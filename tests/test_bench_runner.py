@@ -247,3 +247,60 @@ class TestTaskFixes:
             encoding="utf-8",
         )
         assert t1.judge("", tmp_path) is False
+
+
+class TestReporterErrors:
+    """报告渲染运行错误明细（聚合层保留、此前从未渲染的诊断信息）。"""
+
+    @staticmethod
+    def _metrics(task_id, mode, errors):
+        from benchmark.metrics import TaskMetrics
+
+        return TaskMetrics(
+            task_id=task_id,
+            task_name="测试任务",
+            difficulty="easy",
+            mode=mode,
+            success=False,
+            errors=errors,
+        )
+
+    def test_report_contains_error_details(self, tmp_path):
+        from benchmark.reporter import Reporter
+
+        single = [self._metrics("easy-01", "single", [])]
+        multi = [self._metrics("easy-01", "multi", ["task timeout after 120s"])]
+
+        report = Reporter.generate(single, multi, str(tmp_path))
+        text = report.read_text(encoding="utf-8")
+
+        assert "## 异常与超时明细" in text
+        assert "easy-01（多Agent）" in text
+        assert "task timeout after 120s" in text
+        # 单 Agent 无错误，不应出现
+        assert "easy-01（单Agent）" not in text.split("## 异常与超时明细")[1]
+
+    def test_report_omits_section_when_no_errors(self, tmp_path):
+        from benchmark.reporter import Reporter
+
+        single = [self._metrics("easy-01", "single", [])]
+        multi = [self._metrics("easy-01", "multi", [])]
+
+        report = Reporter.generate(single, multi, str(tmp_path))
+        text = report.read_text(encoding="utf-8")
+
+        assert "异常与超时明细" not in text
+
+    def test_long_errors_truncated(self, tmp_path):
+        from benchmark.reporter import Reporter
+
+        long_err = "x" * 500
+        single = [self._metrics("easy-01", "single", [long_err])]
+        multi = [self._metrics("easy-01", "multi", [])]
+
+        report = Reporter.generate(single, multi, str(tmp_path))
+        text = report.read_text(encoding="utf-8")
+
+        # 截断到 200 字符 + 省略号，不整段倾倒
+        assert long_err not in text
+        assert "x" * 200 + "…" in text

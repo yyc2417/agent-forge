@@ -127,4 +127,32 @@ class Reporter:
             )
         lines.append("")
 
+        # 异常与超时明细（聚合层保留的各次运行诊断线索）
+        # 2026-09-13 实测的教训：easy-05 多 Agent 失败原因、6 个任务的
+        # 120s 超时都只能靠"耗时恰好 120.0s"反推——errors 已被采集和
+        # 聚合，却从未渲染，进程结束即丢失。无异常时不输出本节。
+        error_lines = Reporter._build_error_section(single_metrics, multi_metrics)
+        if error_lines:
+            lines.append("## 异常与超时明细")
+            lines.append("")
+            lines.extend(error_lines)
+            lines.append("")
+
+        return lines
+
+    @staticmethod
+    def _build_error_section(
+        single_metrics: list[TaskMetrics],
+        multi_metrics: list[TaskMetrics],
+    ) -> list[str]:
+        """构建异常明细行：按任务×模式列出去重后的 errors（每条截断 200 字符）。"""
+        lines: list[str] = []
+        for metrics in (*single_metrics, *multi_metrics):
+            if not metrics.errors:
+                continue
+            mode_label = "单Agent" if metrics.mode == "single" else "多Agent"
+            lines.append(f"- **{metrics.task_id}（{mode_label}）**")
+            for err in metrics.errors:
+                text = err if len(err) <= 200 else f"{err[:200]}…"
+                lines.append(f"  - {text}")
         return lines
