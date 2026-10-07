@@ -1,6 +1,6 @@
 # Orchestrator 模块文档
 
-> **状态**：阶段 2已实现 | **最后更新**：2026-06-07
+> **状态**：阶段 2已实现 | **最后更新**：2026-10-07
 
 ---
 
@@ -56,10 +56,15 @@ decompose → execute → [all_done?] → review → [passed?]
 
 | Agent | 角色 | 工具集 | 说明 |
 |-------|------|--------|------|
-| `CoderAgent` | 编码专家 | read_file, write_file, run_shell | 负责代码实现 |
-| `ReviewerAgent` | 审查专家 | read_file | 审查代码，输出【通过】/【不通过】 |
+| `CoderAgent` | 编码专家 | read_file, grep_search, write_file, run_shell | 负责代码实现 |
+| `ReviewerAgent` | 审查专家 | read_file, grep_search | 审查代码，输出【通过】/【不通过】 |
 
 Specialist 继承 BaseAgent，只定制 `name`、`role`、`tools` 和 `get_system_prompt()`。
+
+> **工具对等**（2026-10-07，ADR-006）：硬编码工具列表与 registry 路径
+> （`bind_tools(max_permission)` 对默认注册表的过滤结果）保持一致——
+> 此前 Coder/Reviewer 硬编码路径缺 grep_search，导致 benchmark 单/多
+> 模式工具不对等。
 
 ---
 
@@ -146,4 +151,4 @@ orchestrator = Orchestrator(
 
 ---
 
-> **最后更新**：2026-06-07
+> **最后更新**：2026-10-07（Specialist 工具表对齐 ADR-006）
