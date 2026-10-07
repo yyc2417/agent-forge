@@ -14,12 +14,15 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           version: "latest"
+          # uv.lock 有意不入库（.gitignore），缓存键改用真实依赖清单，
+          # 否则 setup-uv 默认 glob（**/uv.lock）匹配不到文件
+          cache-dependency-glob: pyproject.toml
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
