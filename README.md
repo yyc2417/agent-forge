@@ -82,7 +82,7 @@ graph LR
 | **分层记忆** | 短期（滑动窗口+摘要压缩）+ 长期（JSON 持久化）+ 会话管理 | 自动保存/加载 |
 | **工具系统** | 三级权限模型（READ/WRITE/EXECUTE）+ 审批门 + 沙箱 + MCP 生态 | @tool 装饰器, Function Calling, MCP |
 | **可观测性** | BusCollector 事件采集 + Streamlit 4-Tab Dashboard | 线程安全, 实时刷新 |
-| **量化评测** | 20 个标准任务, 5 种评判类型, 已产出实测对比数据 | 隔离执行, 3 次取中位数 |
+| **量化评测** | 25 个标准任务（8 easy + 8 medium + 4 hard + 5 expert，expert 已建待测）, 5 种评判类型, 已产出实测对比数据 | 隔离执行, 3 次取中位数 |
 
 ## 实测数据：单 Agent vs 多 Agent
 
@@ -156,7 +156,8 @@ benchmark/                    # 量化评测框架
 ├── judge.py                  #   自动评判（5 种类型）
 ├── metrics.py                #   指标采集
 ├── reporter.py               #   Markdown 报告生成
-└── tasks/                    #   20 个标准任务（8 easy + 8 medium + 4 hard）
+└── tasks/                    #   25 个标准任务（8 easy + 8 medium + 4 hard + 5 expert）
+                              #     expert 层附带确定性 fixture 项目（ADR-008）
 
 tests/                        # 单元测试（202 个用例 + GitHub Actions CI）
 demos/                        # 渐进式 Demo + 多场景工作流

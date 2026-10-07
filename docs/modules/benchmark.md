@@ -19,14 +19,16 @@ Benchmark 系统是 AgentForge 的量化评测框架，用数据回答"多 Agent
 
 ```
 benchmark/
-├── tasks/          # 20 个标准任务（8 easy + 8 medium + 4 hard）
+├── tasks/          # 25 个标准任务（8 easy + 8 medium + 4 hard + 5 expert）
 │   ├── easy/       # 文件操作、Shell 命令、简单计算
 │   ├── medium/     # 函数编写、代码分析、多文件操作
-│   └── hard/       # 完整类实现、代码重构、报告生成
+│   ├── hard/       # 完整类实现、代码重构、报告生成（超时 240s）
+│   └── expert/     # 去重重构/规格实现/跨文件修 bug/约定扩展/全库盘点
+│                   #   + fixture_project.py（确定性库存管理应用，ADR-008）
 ├── judge.py        # 自动评判器（5 种评判类型）
 ├── metrics.py      # 指标采集（TaskMetrics + MetricsCollector）
-├── runner.py       # 执行引擎（BenchmarkRunner）
-└── reporter.py     # 报告生成器（Markdown）
+├── runner.py       # 执行引擎（BenchmarkRunner，分层团队工厂）
+└── reporter.py     # 报告生成器（Markdown + 异常明细）
 ```
 
 ### 核心类
@@ -158,12 +160,28 @@ benchmark/
 from benchmark import run_benchmark
 single, multi, report = run_benchmark(quick=True)
 
-# 完整模式（20 个任务，3 次运行）
+# 完整模式（25 个任务，3 次运行；expert 层已建待测，实测数字以报告为准）
 single, multi, report = run_benchmark()
 
 # 按难度过滤
 single, multi, report = run_benchmark(difficulty="easy")
 ```
+
+---
+
+## Expert 难度层（2026-10-07 建成，实测待执行）
+
+任务集的第四层（ADR-008），补测 v1–v3 实测未覆盖的三个假设：
+
+| 假设 | 内容 | 对应任务 |
+|------|------|---------|
+| H1 异质角色 | analyst/writer 的专用 prompt+工具集的价值（expert 层多模式为四人团队，其余层维持 coder+reviewer 两人队） | expert-02/03/04 |
+| H2 长链条依赖 | 有明确阶段顺序的任务中计划结构化的收益 | expert-01/02 |
+| H3 上下文规模 | 信息量大到单 Agent 上下文吃紧时分而治之的收益 | expert-05 |
+
+- **Fixture**：`tasks/expert/fixture_project.py`——确定性库存管理应用（约 15 文件），预埋重复代码 / 遗留 bug / 元数据头三类种子；构建即 pytest 全绿由测试固化
+- **判据范式**（借自 AppWorld 状态单测，见业内对比）：验终态（真实跑 pytest / import 探针，只看返回码）+ 查副作用（保护文件与 pristine 逐文件比对）+ 隐藏验收测试（judge 时写入）
+- **可满足性**：每任务的金路径/失败路径零 API 测试——judge 对正确终态必过、对错误终态必拒
 
 ---
 
