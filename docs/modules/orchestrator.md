@@ -37,6 +37,10 @@ decompose → execute → [all_done?] → review → [passed?]
               (retry, not passed) ←──┘     aggregate → END
 ```
 
+> **快速路径**（2026-10-07，ADR-007）：review 节点内部对
+> complexity=simple 且计划恰好 1 步的任务直接放行（免审查），
+> 图结构不变，只短路 review 的审查调用。
+
 ### OrchestratorState
 
 | 字段 | 类型 | 说明 |
@@ -49,6 +53,7 @@ decompose → execute → [all_done?] → review → [passed?]
 | `review_passed` | `bool` | 审查是否通过 |
 | `final_output` | `str` | 最终汇总报告 |
 | `retry_count` | `int` | 回退重试计数 |
+| `complexity` | `str` | 拆解 LLM 判定的复杂度（simple/complex；缺失按 complex） |
 
 ---
 
@@ -57,7 +62,7 @@ decompose → execute → [all_done?] → review → [passed?]
 | Agent | 角色 | 工具集 | 说明 |
 |-------|------|--------|------|
 | `CoderAgent` | 编码专家 | read_file, grep_search, write_file, run_shell | 负责代码实现 |
-| `ReviewerAgent` | 审查专家 | read_file, grep_search | 审查代码，输出【通过】/【不通过】 |
+| `ReviewerAgent` | 审查专家 | read_file, grep_search | 审查代码，输出 JSON 判定（pass/fail，标记兜底） |
 
 Specialist 继承 BaseAgent，只定制 `name`、`role`、`tools` 和 `get_system_prompt()`。
 
@@ -120,24 +125,27 @@ orchestrator = Orchestrator(
 
 ## 关键设计决策
 
-详见 `docs/adr/003-orchestrator-design.md`：
+详见 `docs/adr/003-orchestrator-design.md`（原始设计）与 `docs/adr/007-orchestrator-lowcost-optimizations.md`（2026-10 优化）：
 
 1. **继承 BaseAgent 而非组合**：复用 LLM/Bus/init 基础设施
 2. **直接调用 + Bus 事件发布**：控制流清晰 + 可观测性
 3. **LLM 拆解 + fallback**：三层防护确保拆解不会失败
-4. **双条件审查判定**：`"通过" in r and "不通过" not in r` 减少误判
-5. **审查节点职责分离**：`_review_node` 拆分为 5 个子方法，主方法仅做流程编排
+4. **复杂度门控快速路径**（ADR-007）：complexity=simple 且单步计划免审查，缺失/多步一律保守走审查
+5. **审查交接读真实文件**（ADR-007）：Reviewer 收到文件路径列表 + 8000 字符产出（旧版 200/2000 截断），按磁盘文件判定
+6. **判定双通道**（ADR-007）：JSON `{"verdict": "pass"/"fail"}` 优先，【通过】/【不通过】标记兜底，无信号保守判不通过
+7. **审查节点职责分离**：`_review_node` 拆分为 6 个子方法，主方法仅做流程编排
 
 ### 审查节点的职责分离
 
-`_review_node` 承担审查流程的编排，具体逻辑委托给 5 个独立子方法：
+`_review_node` 承担审查流程的编排，具体逻辑委托给 6 个独立子方法：
 
 | 子方法 | 职责 | 可独立测试 |
 |--------|------|----------|
 | `_should_skip_review` | 前置检查（无产出/无 Reviewer → 跳过） | ✅ |
+| `_is_simple_fast_path` | 快速路径（simple 且单步 → 免审查） | ✅ |
 | `_should_force_pass` | 重试控制（达到上限 → 强制通过） | ✅ |
-| `_call_reviewer` | 构建 prompt + 调用 Reviewer + Bus 事件 | ✅ |
-| `_parse_review_result` | 双条件判定（通过/不通过） | ✅ |
+| `_call_reviewer` | 构建交接 prompt（文件路径+完整产出）+ 调用 + Bus 事件 | ✅ |
+| `_parse_review_result` | 双通道判定（JSON 优先，标记兜底） | ✅ |
 | `_reset_execution_state` | 重置 plan/current_step/retry_count | ✅ |
 
 ---
@@ -151,4 +159,4 @@ orchestrator = Orchestrator(
 
 ---
 
-> **最后更新**：2026-10-07（Specialist 工具表对齐 ADR-006）
+> **最后更新**：2026-10-07（ADR-007 三项优化：复杂度门控/审查交接/判定双通道）

@@ -37,6 +37,8 @@ class MyAgent(BaseAgent):
 
 **兜底四件套**：轮次上限（`max_turns`，默认 5）；连续工具失败 ≥3 次熔断；相同 `(tool, args)` 连续 3 次拦截（单轮累计 2 次强制终止）；异常终止时输出结构化兜底文案。
 
+**Orchestrator 快速路径（ADR-007）**：拆解 LLM 判定 `complexity=simple` 且计划恰好 1 步 → 跳过审查门；字段缺失/多步计划/拆解异常一律保守走完整审查。Reviewer 审查基于磁盘真实文件（编排者传文件路径），判定 JSON（`{"verdict": "pass"/"fail"}`）优先、【通过】/【不通过】标记兜底。
+
 ### 消息总线（Pub/Sub）
 
 ```python

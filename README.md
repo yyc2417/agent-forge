@@ -63,6 +63,8 @@ graph LR
     R -->|不通过| E
 ```
 
+> 复杂度门控（ADR-007）：拆解判定为 simple 的单步任务跳过 Review 审查，直接汇总。
+
 不同场景通过配置不同的 Specialist 组合来实现：
 
 | 场景 | Agent 组合 | 说明 |

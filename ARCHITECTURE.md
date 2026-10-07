@@ -88,9 +88,12 @@ Orchestrator（Plan-and-Execute）
     │       │
     │       └── Reviewer Agent（ReAct 循环）
     │             ├── agent_node: LLM 推理
-    │             └── tool_node: read_file 审查代码
+    │             └── tool_node: read_file / grep_search 审查代码（按编排者
+    │                  提供的文件路径读磁盘真实内容，ADR-007）
     │
-    ├── 3. review_node: 审查判定（通过 → aggregate，不通过 → 回退 execute）
+    ├── 3. review_node: 审查判定（JSON verdict 优先、【通过】/【不通过】
+    │       标记兜底；通过 → aggregate，不通过 → 回退 execute；
+    │       complexity=simple 且单步计划免审查，ADR-007）
     └── 4. aggregate_node: 汇总所有产出 → 最终报告
 
     全程事件发布到 MessageBus
@@ -213,4 +216,4 @@ streamlit run agent_forge/dashboard/app.py
 
 ---
 
-> 最后更新：2026-09-29（specialists 补齐 4 个 Agent；兜底四件套与 README/AGENTS.md 统一口径）
+> 最后更新：2026-10-07（Orchestrator 快速路径/审查交接/判定双通道，ADR-007；benchmark v2 基线，ADR-006）
