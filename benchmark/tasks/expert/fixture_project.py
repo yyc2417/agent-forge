@@ -427,13 +427,14 @@ FIXTURE_FILES: dict[str, str] = {
     ),
 }
 
-# expert-02 副作用检查的保护清单：实现该功能不应改动这些文件。
+# expert-02 副作用检查的保护清单：spec.md 约束"models/storage/reporting、
+# 现有测试与文档不得改动"——services.py 与 cli.py 是该功能的目标文件，
+# 不在保护之列。
 PROTECTED_FILES: tuple[str, ...] = (
     "inventory/__init__.py",
     "inventory/models.py",
     "inventory/storage.py",
     "inventory/reporting.py",
-    "inventory/cli.py",
     "tests/test_storage.py",
     "tests/test_services.py",
     "tests/test_reporting.py",

@@ -314,13 +314,13 @@ class TestExpertTierInfra:
     def _expert_task():
         return _make_task(id="expert-99", difficulty="expert")
 
-    def test_loader_tolerates_missing_expert_dir(self):
-        """expert 目录尚未创建（任务在后续批次落地）——加载不报错。"""
+    def test_loader_scans_expert_dir(self):
+        """加载器扫描 expert 目录（批次 D 落地 5 任务后，加载不报错）。"""
         from benchmark.tasks import load_all_tasks
 
         tasks = load_all_tasks()
-        assert tasks
-        assert all(t.difficulty in {"easy", "medium", "hard"} for t in tasks)
+        difficulties = {t.difficulty for t in tasks}
+        assert difficulties == {"easy", "medium", "hard", "expert"}
 
     def test_summary_by_difficulty_includes_expert(self):
         from benchmark.metrics import BenchmarkSummary, TaskMetrics
