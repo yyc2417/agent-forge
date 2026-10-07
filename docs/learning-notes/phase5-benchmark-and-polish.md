@@ -8,15 +8,19 @@
 
 ## 为什么需要 Benchmark？
 
-在技术讨论中说"多 Agent 比单 Agent 好"是不够的——大家要看数据。但业内没有现成的多 Agent 协作 benchmark：
+在技术讨论中说"多 Agent 比单 Agent 好"是不够的——大家要看数据。业内没有现成的"确定性判据的多 Agent 协作 benchmark"（2025 调研 + 2026-10 复查）：
 
 | Benchmark | 出品方 | 测什么 | 为什么不用 |
 |-----------|--------|--------|-----------|
-| SWE-bench | Princeton | 单 agent 代码修复 | 不测多 agent 协作 |
-| GAIA | Meta | 推理 + 工具调用 | 不涉及 agent 分工和通信 |
-| AgentBench | THU | 8 个环境 | 偏任务覆盖面 |
+| SWE-bench | Princeton | 单 agent 代码修复 | 不测多 agent 协作；每任务 Docker + 全仓测试，远超单任务预算 |
+| GAIA | Meta | 推理 + 工具调用 | 需网页浏览，与文件/shell 沙箱不匹配 |
+| AgentBench | THU | 8 个环境 | 偏任务覆盖面，无协作维度 |
+| MultiAgentBench | 清华（ACL 2025） | 多 Agent 协作与竞争 | 主题最对口但判据是 LLM-as-judge——与确定性判据原则冲突；需 MySQL+Redis |
+| AppWorld | Stony Brook（ACL 2024） | 交互式工具使用 | 判据范式（状态单测）已被借鉴；但 REST API 工具面不重合，集成需独立适配层 |
+| TheAgentCompany | CMU | 长程公司场景 | 需自托管 GitLab/RocketChat/ownCloud 全家桶 |
+| HiddenBench | arXiv 2026-02 | 分布式信息集体推理 | harness 不可直接复用，列为跟踪对象 |
 
-所以自己设计了一个定制 benchmark，测量完成率、耗时、Token 消耗，对比单/多 Agent 两种模式。
+所以自己设计了一个定制 benchmark，测量完成率、耗时、Token 消耗，对比单/多 Agent 两种模式。2026 复查的关键发现：主题最对口的 MultiAgentBench 也用 LLM-as-judge 评协作——"确定性判据评多 Agent 协作"没有现成解，这是自建路线的立足点；新套件的价值在范式（状态单测/milestone 拆解），已落入 expert 层判据设计。
 
 ---
 

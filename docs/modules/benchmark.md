@@ -11,7 +11,7 @@
 Benchmark 系统是 AgentForge 的量化评测框架，用数据回答"多 Agent 协作何时有价值"。它自动运行标准任务集，对比单 Agent 和多 Agent 的表现，生成 Markdown 报告。
 
 **核心结论**（2026-10-07 v3，编排优化后 A/B）：
-> "我设计了定制 benchmark，在 20 个分级任务上对比单 Agent 与多 Agent 编排（每任务 3 次取中位数）。第一轮实测后我复审自己的评测系统，修掉 4 个测量有效性问题得到干净基线（单 100% vs 多 95%，多 Agent 成本 4.5 倍）；接着做三项编排优化（复杂度门控/审查交接/判定双通道）再同日 A/B：成功率持平，多 Agent 编排开销从 +416%/+353% 收窄到 +76%/+51%，超时清零，hard-03 上多 Agent 首次反超单 Agent。同时我调研了 SWE-bench、GAIA 等业内标准，发现它们都聚焦单 agent 能力，没有测多 agent 协作的维度。"
+> "我设计了定制 benchmark，在 20 个分级任务上对比单 Agent 与多 Agent 编排（每任务 3 次取中位数）。第一轮实测后我复审自己的评测系统，修掉 4 个测量有效性问题得到干净基线（单 100% vs 多 95%，多 Agent 成本 4.5 倍）；接着做三项编排优化（复杂度门控/审查交接/判定双通道）再同日 A/B：成功率持平，多 Agent 编排开销从 +416%/+353% 收窄到 +76%/+51%，超时清零，hard-03 上多 Agent 首次反超单 Agent。业内标准 2025 年调研过一轮（SWE-bench/GAIA/AgentBench），2026 年复查了 MultiAgentBench、AppWorld 等新套件：结论仍成立——最对口的 MultiAgentBench 也用 LLM-as-judge 评协作，'确定性判据评多 Agent 协作'没有现成解。"
 
 ---
 
@@ -167,15 +167,19 @@ single, multi, report = run_benchmark(difficulty="easy")
 
 ---
 
-## 与业内 Benchmark 的对比
+## 与业内 Benchmark 的对比（2026-10 复查版）
 
-| Benchmark | 出品方 | 测什么 | 为什么不用 |
-|-----------|--------|--------|-----------|
-| SWE-bench | Princeton | 单 agent 代码修复 | 不测多 agent 协作 |
-| GAIA | Meta | 推理 + 工具调用 | 不涉及 agent 分工 |
-| AgentBench | THU | 8 个环境的 agent 能力 | 偏任务覆盖面 |
+| Benchmark | 出品方 | 测什么 | 为什么不用（判据 / 工具面 / 基础设施） |
+|-----------|--------|--------|--------------------------------------|
+| SWE-bench (Lite/Verified) | Princeton | 单 agent 代码修复（真实 GitHub Issue） | 单 agent 能力域；每任务需 checkout 特定 commit + 安装依赖 + Docker，远超本框架单任务 240s 预算 |
+| GAIA | Meta | 多跳推理 + 工具调用 | 大部分任务需要网页浏览，与文件/shell 工具沙箱不匹配 |
+| AgentBench | THU | 8 个环境的 agent 能力 | 偏任务覆盖面，无协作维度 |
+| **MultiAgentBench (MARBLE)** | 清华（ACL 2025） | 多 Agent 协作与竞争（6 场景） | **主题最对口**，但判据是 LLM-as-judge + milestone 检测器——与本项目确定性判据原则冲突；需要 MySQL+Redis docker-compose；任务基于 SWE-bench-lite/Commit0，超出单任务预算 |
+| **AppWorld** | Stony Brook（ACL 2024） | 交互式工具使用（9 App / 457 API） | 判据范式已被本项目借鉴（状态单测，见 ADR-008）；但 REST API 世界与文件/shell 工具沙箱不重合，集成需独立适配层；license 同意后 train/dev 仅 90/57 题可用 |
+| **TheAgentCompany** | CMU | 长程公司场景任务 | 需自托管 GitLab/RocketChat/ownCloud 全家桶，基础设施成本不成立 |
+| **HiddenBench** | arXiv（2026-02） | 分布式信息下的集体推理 | 概念上贴近"上下文规模"假设，harness 不可直接复用，列为跟踪对象 |
 
-**核心发现**：业内还没有专门测"多 Agent 协作编排质量"的通用 benchmark。
+**核心发现（2026 版）**：业内仍没有"确定性判据的多 Agent 协作 benchmark"——主题最对口的 MultiAgentBench 也用 LLM-as-judge 评协作，反证"规则判据 + 自建任务集"路线的难度与价值。新套件的可借鉴处在于范式而非套件本身：AppWorld 的状态单测（验终态 + 查副作用）与 MARBLE 的 milestone 拆解已分别落入 expert 层判据设计（ADR-008）。
 
 ---
 
