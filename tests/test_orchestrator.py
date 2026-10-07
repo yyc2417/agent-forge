@@ -290,3 +290,38 @@ class TestComplexityGate:
         out = orch._decompose_node({"task": "写一个函数"})
         assert out["complexity"] == "simple"
         assert len(out["plan"]) == 1
+
+
+# ─── 审查交接：Reviewer 读真实文件而非截断文本 ────────────
+
+class TestReviewHandoff:
+    """_call_reviewer 交接改造：完整产出 + 文件路径 + 读取指令。"""
+
+    def test_extract_artifact_paths_dedup_and_order(self):
+        orch = Orchestrator(specialists={"coder": _StubAgent()})
+        output = (
+            "先写 src/utils.py，然后更新 src/utils.py 的测试 "
+            "tests/test_utils.py，配置见 config.json"
+        )
+        assert orch._extract_artifact_paths(output) == [
+            "src/utils.py", "tests/test_utils.py", "config.json",
+        ]
+
+    def test_extract_artifact_paths_cap_at_8(self):
+        orch = Orchestrator(specialists={"coder": _StubAgent()})
+        output = " ".join(f"f{i}.py" for i in range(20))
+        assert len(orch._extract_artifact_paths(output)) == 8
+
+    def test_call_reviewer_prompt_has_paths_and_full_output(self):
+        """prompt 必须含文件路径、读取指令，且产出不再截断到 2000。"""
+        reviewer = _StubAgent(name="reviewer", outputs=["【通过】"])
+        orch = Orchestrator(specialists={"coder": reviewer})
+        long_output = "写入 safe_divide.py\n" + "x = 1\n" * 1300 + "TAIL_MARKER_超出旧版2000截断"
+        review = orch._call_reviewer(reviewer, "实现安全除法", long_output)
+
+        assert review == "【通过】"
+        prompt = reviewer.calls[0]
+        assert "safe_divide.py" in prompt
+        assert "read_file" in prompt
+        # 旧版 [:2000] 会截掉的尾部，现在保留
+        assert "TAIL_MARKER_超出旧版2000截断" in prompt

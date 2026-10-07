@@ -362,13 +362,31 @@ class Orchestrator(BaseAgent):
             return True, f"已达最大重试次数 ({self._max_retries})，强制通过"
         return False, ""
 
+    def _extract_artifact_paths(self, coder_output: str) -> list[str]:
+        """从 Coder 产出中提取文件路径，供 Reviewer 实际读取。
+
+        提取顺序保持出现顺序、去重、上限 8 个——Reviewer 的
+        max_turns 有限，路径列表过长会挤占审查预算。
+        """
+        pattern = (r"[A-Za-z0-9_\-./\\]+"
+                   r"\.(?:py|md|txt|json|toml|yaml|yml|cfg|ini|sh|js|ts|html|css)\b")
+        seen: list[str] = []
+        for match in re.findall(pattern, coder_output):
+            if match not in seen:
+                seen.append(match)
+        return seen[:8]
+
     def _call_reviewer(
         self, reviewer: BaseAgent, task: str, coder_output: str
     ) -> str:
         """构建审查 prompt 并调用 Reviewer Agent。
 
-        将原始需求和 Coder 产出组合成审查 prompt，
-        通过 _dispatch_to_agent 调用 Reviewer（同时发布 Bus 事件）。
+        交接设计（2026-10，ADR-007）：
+        - 完整任务描述 + 产出上限 8000 字符（旧版 200/2000 截断，
+          Reviewer 实际看不到 Coder 写了什么）
+        - 提取 Coder 声称写入/涉及的文件路径，要求 Reviewer 用
+          read_file 读真实文件再判定——粘贴的代码片段可能被截断
+          或与磁盘内容不一致，文件才是唯一事实源
 
         Args:
             reviewer: Reviewer Agent 实例。
@@ -376,13 +394,20 @@ class Orchestrator(BaseAgent):
             coder_output: Coder Agent 的代码产出。
 
         Returns:
-            Reviewer 的审查结果文本（包含【通过】或【不通过】判定）。
+            Reviewer 的审查结果文本（包含判定标记）。
         """
+        paths = self._extract_artifact_paths(coder_output)
+        paths_section = (
+            "\n".join(f"- {p}" for p in paths) if paths else "（未识别到文件路径）"
+        )
         return self._dispatch_to_agent(
             reviewer,
             f"请审查以下代码产出并给出判定（【通过】或【不通过】）：\n\n"
-            f"原始需求：{task[:200]}\n\n"
-            f"Coder 的产出：\n{coder_output[:2000]}",
+            f"原始需求：{task[:500]}\n\n"
+            f"Coder 声称写入/涉及的文件：\n{paths_section}\n"
+            f"请先用 read_file 实际读取这些文件，再基于真实文件内容判定"
+            f"（消息中粘贴的代码可能被截断，以磁盘上的文件为准）。\n\n"
+            f"Coder 的产出：\n{coder_output[:8000]}",
         )
 
     def _parse_review_result(self, review_result: str) -> bool:
