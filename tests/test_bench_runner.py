@@ -4,6 +4,7 @@ import re
 import time
 from pathlib import Path
 
+from agent_forge.agents import Orchestrator
 from agent_forge.bus import MessageBus
 from agent_forge.cost import CostTracker
 from benchmark.judge import Judge
@@ -31,7 +32,7 @@ def _fake_factory(output: str = "DONE 一切正常"):
         def run(self, task: str) -> str:
             return output
 
-    def factory(mode: str, bus: MessageBus, cost: CostTracker):
+    def factory(mode: str, bus: MessageBus, cost: CostTracker, task=None):
         return _FakeAgent()
 
     return factory
@@ -68,7 +69,7 @@ class TestRunnerRobustness:
 
     def test_factory_error_recorded(self, tmp_path):
         """工厂异常进入 errors（不再无声消失在 worker 线程里）。"""
-        def bad_factory(mode, bus, cost):
+        def bad_factory(mode, bus, cost, task=None):
             raise RuntimeError("boom")
 
         task = _make_task()
@@ -304,3 +305,62 @@ class TestReporterErrors:
         # 截断到 200 字符 + 省略号，不整段倾倒
         assert long_err not in text
         assert "x" * 200 + "…" in text
+
+
+class TestExpertTierInfra:
+    """expert 难度层基础设施：加载器/统计/分层团队工厂（ADR-008）。"""
+
+    @staticmethod
+    def _expert_task():
+        return _make_task(id="expert-99", difficulty="expert")
+
+    def test_loader_tolerates_missing_expert_dir(self):
+        """expert 目录尚未创建（任务在后续批次落地）——加载不报错。"""
+        from benchmark.tasks import load_all_tasks
+
+        tasks = load_all_tasks()
+        assert tasks
+        assert all(t.difficulty in {"easy", "medium", "hard"} for t in tasks)
+
+    def test_summary_by_difficulty_includes_expert(self):
+        from benchmark.metrics import BenchmarkSummary, TaskMetrics
+
+        m = [TaskMetrics(task_id="expert-99", task_name="x",
+                         difficulty="expert", mode="single", success=True)]
+        summary = BenchmarkSummary.compute(m, m)
+        assert "expert" in summary["by_difficulty"]
+        assert summary["by_difficulty"]["expert"]["single"]["total"] == 1
+
+    def test_report_contains_expert_row(self, tmp_path):
+        from benchmark.metrics import TaskMetrics
+        from benchmark.reporter import Reporter
+
+        m = [TaskMetrics(task_id="expert-99", task_name="x",
+                         difficulty="expert", mode="single", success=True)]
+        report = Reporter.generate(m, m, str(tmp_path))
+        assert "| expert (1) |" in report.read_text(encoding="utf-8")
+
+    def test_factory_expert_uses_full_team(self):
+        """expert 层多模式 = analyst+coder+reviewer+writer，coder max_turns=12。"""
+        runner = BenchmarkRunner()
+        agent = runner._default_agent_factory(
+            "multi", MessageBus(), CostTracker(), self._expert_task())
+        assert isinstance(agent, Orchestrator)
+        assert set(agent._specialists) == {
+            "analyst", "coder", "reviewer", "writer"}
+        assert agent._specialists["coder"]._max_turns == 12
+
+    def test_factory_basic_tiers_unchanged(self):
+        """easy/medium/hard 维持 coder+reviewer 两人队（与 v1–v3 可比）。"""
+        runner = BenchmarkRunner()
+        task = _make_task(id="easy-99", difficulty="easy")
+        agent = runner._default_agent_factory(
+            "multi", MessageBus(), CostTracker(), task)
+        assert set(agent._specialists) == {"coder", "reviewer"}
+        assert agent._specialists["coder"]._max_turns == 8
+
+    def test_factory_task_none_backward_compatible(self):
+        runner = BenchmarkRunner()
+        agent = runner._default_agent_factory(
+            "multi", MessageBus(), CostTracker(), None)
+        assert set(agent._specialists) == {"coder", "reviewer"}

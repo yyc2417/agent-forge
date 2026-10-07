@@ -119,8 +119,8 @@ def load_all_tasks(
     tasks_dir = Path(__file__).parent
     all_tasks: list[TaskDefinition] = []
 
-    # 扫描 easy/medium/hard 子目录
-    for sub_dir in ["easy", "medium", "hard"]:
+    # 扫描 easy/medium/hard/expert 子目录
+    for sub_dir in ["easy", "medium", "hard", "expert"]:
         if difficulty_filter and sub_dir != difficulty_filter:
             continue
 

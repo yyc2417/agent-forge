@@ -33,7 +33,14 @@ import threading
 from pathlib import Path
 from typing import Callable
 
-from agent_forge.agents import BaseAgent, CoderAgent, Orchestrator, ReviewerAgent
+from agent_forge.agents import (
+    AnalystAgent,
+    BaseAgent,
+    CoderAgent,
+    Orchestrator,
+    ReviewerAgent,
+    WriterAgent,
+)
 from agent_forge.bus import MessageBus
 from agent_forge.cost import CostTracker
 from agent_forge.tools import ALL_TOOLS
@@ -48,8 +55,8 @@ from benchmark.metrics import (
 from benchmark.reporter import Reporter
 from benchmark.tasks import TaskDefinition, load_all_tasks, load_quick_tasks
 
-# Agent 工厂：按模式创建 Agent（测试可注入假 Agent，不发真实请求）
-AgentFactory = Callable[[str, MessageBus, CostTracker], BaseAgent]
+# Agent 工厂：按模式（及任务难度）创建 Agent（测试可注入假 Agent，不发真实请求）
+AgentFactory = Callable[[str, MessageBus, CostTracker, TaskDefinition], BaseAgent]
 
 
 def _call_setup(fn: Callable, work_dir: Path) -> None:
@@ -238,7 +245,7 @@ class BenchmarkRunner:
 
                 factory = self._agent_factory or self._default_agent_factory
                 try:
-                    agent = factory(mode, bus, cost_tracker)
+                    agent = factory(mode, bus, cost_tracker, task)
                 except Exception as e:
                     outcome["errors"].append(f"agent factory failed: {e}")
                     agent = None
@@ -293,9 +300,20 @@ class BenchmarkRunner:
         )
 
     def _default_agent_factory(
-        self, mode: str, bus: MessageBus, cost_tracker: CostTracker
+        self,
+        mode: str,
+        bus: MessageBus,
+        cost_tracker: CostTracker,
+        task: TaskDefinition | None = None,
     ) -> BaseAgent:
-        """默认 Agent 工厂：按模式创建单 Agent 或 Orchestrator。"""
+        """默认 Agent 工厂：按模式创建单 Agent 或 Orchestrator。
+
+        多 Agent 模式按任务难度分层组队（ADR-008）：
+        - easy/medium/hard：coder + reviewer（与 v1–v3 实测配置一致，保持可比）
+        - expert：analyst + coder + reviewer + writer 全团队，
+          Coder max_turns 提升到 12（expert 任务跨多文件，
+          medium-07 失败根因即探索轮次耗尽）
+        """
         if mode == "single":
             return BaseAgent(
                 name="solo",
@@ -304,6 +322,18 @@ class BenchmarkRunner:
                 bus=bus,
                 cost_tracker=cost_tracker,
                 max_turns=10,
+            )
+        if task is not None and task.difficulty == "expert":
+            coder = CoderAgent(bus=bus, cost_tracker=cost_tracker, max_turns=12)
+            return Orchestrator(
+                specialists={
+                    "analyst": AnalystAgent(bus=bus, cost_tracker=cost_tracker),
+                    "coder": coder,
+                    "reviewer": ReviewerAgent(bus=bus, cost_tracker=cost_tracker),
+                    "writer": WriterAgent(bus=bus, cost_tracker=cost_tracker),
+                },
+                bus=bus,
+                cost_tracker=cost_tracker,
             )
         coder = CoderAgent(bus=bus, cost_tracker=cost_tracker)
         reviewer = ReviewerAgent(bus=bus, cost_tracker=cost_tracker)

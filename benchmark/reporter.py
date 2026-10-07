@@ -88,7 +88,7 @@ class Reporter:
         lines.append("")
         lines.append("| 难度 | 单 Agent | 多 Agent |")
         lines.append("|------|---------|----------|")
-        for d in ["easy", "medium", "hard"]:
+        for d in ["easy", "medium", "hard", "expert"]:
             ds = summary["by_difficulty"].get(d, {})
             single_d = ds.get("single", {})
             multi_d = ds.get("multi", {})

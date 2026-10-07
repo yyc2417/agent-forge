@@ -237,6 +237,6 @@ class BenchmarkSummary:
                     "single": _group_stats([m for m in single_metrics if m.difficulty == d]),
                     "multi": _group_stats([m for m in multi_metrics if m.difficulty == d]),
                 }
-                for d in ["easy", "medium", "hard"]
+                for d in ["easy", "medium", "hard", "expert"]
             },
         }
