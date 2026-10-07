@@ -402,7 +402,8 @@ class Orchestrator(BaseAgent):
         )
         return self._dispatch_to_agent(
             reviewer,
-            f"请审查以下代码产出并给出判定（【通过】或【不通过】）：\n\n"
+            f"请审查以下代码产出并给出判定（第一行输出 JSON："
+            f"{{\"verdict\": \"pass\"}} 或 {{\"verdict\": \"fail\"}}）：\n\n"
             f"原始需求：{task[:500]}\n\n"
             f"Coder 声称写入/涉及的文件：\n{paths_section}\n"
             f"请先用 read_file 实际读取这些文件，再基于真实文件内容判定"
@@ -410,13 +411,36 @@ class Orchestrator(BaseAgent):
             f"Coder 的产出：\n{coder_output[:8000]}",
         )
 
-    def _parse_review_result(self, review_result: str) -> bool:
-        """解析审查结果，判定是否通过。
+    def _parse_verdict_json(self, text: str) -> bool | None:
+        """从审查文本中提取 {"verdict": "pass"/"fail"} JSON 判定。
 
-        按系统提示规定的【通过】/【不通过】标记精确匹配，方向保守：
-        - 出现【不通过】→ False（即使同时出现【通过】）
-        - 出现【通过】且无【不通过】→ True
-        - 两者皆无 → False（保守失败）
+        扫描文本中所有最小 JSON 对象（不嵌套），取第一个含合法
+        verdict 的；无有效 JSON 返回 None，交回标记兜底判定。
+        """
+        for match in re.findall(r'\{[^{}]*\}', text):
+            try:
+                data = json.loads(match)
+            except json.JSONDecodeError:
+                continue
+            verdict = str(data.get("verdict", "")).strip().lower()
+            if verdict == "pass":
+                return True
+            if verdict == "fail":
+                return False
+        return None
+
+    def _parse_review_result(self, review_result: str) -> bool:
+        """解析审查结果，判定是否通过。双通道设计（2026-10，ADR-007）：
+
+        1. JSON 通道（首选）：prompt 要求 Reviewer 首行输出
+           {"verdict": "pass"/"fail"}——结构化输出不依赖措辞，
+           消除"标记词漏输出 → 误判不通过 → 意外回退重跑"的
+           token/超时放大器
+        2. 标记通道（兜底）：JSON 缺失或非法时，沿用【通过】/
+           【不通过】标记精确匹配，方向保守：
+           - 出现【不通过】→ False（即使同时出现【通过】）
+           - 出现【通过】且无【不通过】→ True
+           - 两者皆无 → False（保守失败）
 
         为什么不用子串判定？"未通过编译"、"无法通过审查"等否定变体
         含"通过"字样但不含"不通过"，旧的 `"通过" in and "不通过" not in`
@@ -428,6 +452,9 @@ class Orchestrator(BaseAgent):
         Returns:
             True 表示审查通过，False 表示不通过。
         """
+        verdict = self._parse_verdict_json(review_result)
+        if verdict is not None:
+            return verdict
         if "【不通过】" in review_result:
             return False
         return "【通过】" in review_result

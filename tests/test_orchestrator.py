@@ -325,3 +325,44 @@ class TestReviewHandoff:
         assert "read_file" in prompt
         # 旧版 [:2000] 会截掉的尾部，现在保留
         assert "TAIL_MARKER_超出旧版2000截断" in prompt
+
+
+# ─── 判定双通道：JSON 优先，标记兜底 ──────────────────────
+
+class TestVerdictDualChannel:
+    """_parse_review_result 双通道：JSON 契约优先，标记语义保持不变。"""
+
+    @staticmethod
+    def _parser():
+        return Orchestrator(specialists={"coder": _StubAgent()})
+
+    def test_json_pass(self):
+        orch = self._parser()
+        assert orch._parse_review_result('{"verdict": "pass"}\n问题：无') is True
+
+    def test_json_fail_with_reason(self):
+        orch = self._parser()
+        text = '{"verdict": "fail", "reason": "缺少错误处理"}\n问题：...'
+        assert orch._parse_review_result(text) is False
+
+    def test_json_case_insensitive(self):
+        orch = self._parser()
+        assert orch._parse_review_result('{"verdict": "PASS"}') is True
+        assert orch._parse_review_result('{"verdict": "Fail"}') is False
+
+    def test_json_invalid_falls_back_to_markers(self):
+        """JSON 非法 → 标记兜底，保守语义不变。"""
+        orch = self._parser()
+        assert orch._parse_review_result('{"verdict": "ok"}【通过】') is True
+        assert orch._parse_review_result('{"verdict": "ok"}【不通过】') is False
+
+    def test_json_takes_priority_over_markers(self):
+        """JSON 与标记同时出现且矛盾 → JSON 契约优先（通道设计决定）。"""
+        orch = self._parser()
+        assert orch._parse_review_result(
+            '{"verdict": "pass"}\n旧格式备注：【不通过】分支已废弃') is True
+
+    def test_no_signal_still_fails_conservatively(self):
+        orch = self._parser()
+        assert orch._parse_review_result("代码写完了，挺好的") is False
+        assert orch._parse_review_result("") is False

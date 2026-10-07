@@ -108,15 +108,16 @@ class ReviewerAgent(BaseAgent):
     - 这体现了最小权限原则：每个 Agent 只拥有完成任务所需的最小工具集
     - grep_search 用于定位待审查代码（与 registry READ 路径一致）
 
-    判定格式：
-    system prompt 要求 Reviewer 首先输出【通过】或【不通过】。
+    判定格式（双通道，2026-10 ADR-007）：
+    system prompt 要求 Reviewer 首行输出 JSON 判定：
+    {"verdict": "pass"} 或 {"verdict": "fail"}。
     Orchestrator 据此做条件路由：
-    - 【通过】→ 进入汇总阶段
-    - 【不通过】→ 回退到 Coder 重新编码
+    - pass → 进入汇总阶段
+    - fail → 回退到 Coder 重新编码
 
-    为什么用中文方括号【】而不是英文 [OK]/[FAIL]？
-    - 中文方括号在 LLM 输出中辨识度更高，不容易被混入正文
-    - 判定按【通过】/【不通过】标记精确匹配，减少误判
+    兜底：JSON 缺失/非法时，Orchestrator 回退到旧的【通过】/
+    【不通过】标记精确匹配（中文方括号辨识度高，不易混入正文），
+    两个通道都无信号时保守判不通过。
     """
 
     # 经 ToolRegistry 绑定工具时允许的最大权限级别（只读角色）
@@ -164,12 +165,13 @@ class ReviewerAgent(BaseAgent):
 4. 完整性：是否覆盖了边界情况
 
 输出格式（严格遵守）：
-- 首先给出判定：【通过】或【不通过】
+- 第一行输出 JSON 判定：{"verdict": "pass", "reason": "一句话理由"}
+  或 {"verdict": "fail", "reason": "一句话理由"}
 - 然后列出发现的问题（如有）
 - 最后给出改进建议（如有）
 
-注意：如果代码质量可接受，应该给出【通过】，不要过于苛刻。
-只有存在严重问题（安全漏洞、功能缺失、明显 bug）时才给【不通过】。
+注意：如果代码质量可接受，应该给 {"verdict": "pass"}，不要过于苛刻。
+只有存在严重问题（安全漏洞、功能缺失、明显 bug）时才给 {"verdict": "fail"}。
 """
 
 
