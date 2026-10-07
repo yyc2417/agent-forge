@@ -186,6 +186,43 @@ class TestTaskFixes:
         report.unlink()
         assert t4.judge("", tmp_path) is False
 
+    def test_medium_07_judge_accepts_flexible_formats(self, tmp_path):
+        """修复验证：medium-07 改期望值 custom judge，替代格式敏感的 regex。"""
+        from benchmark.tasks.medium import task_07_shell_pipeline as t7
+
+        t7.setup(tmp_path)
+        top5 = t7._expected_top5(tmp_path)
+        assert len(top5) == 5
+
+        # 期望值即真实行数，可反推每个文件的"文件名+行数"输出行
+        def _entry(i, template):
+            name, counts = top5[i]
+            return template.format(name=name, count=max(counts))
+
+        # 三种常见表述混合：`7 base.py` / `specialists.py: 9` / `file_tools.py（11 行）`
+        ok_output = "\n".join([
+            "行数最多的 5 个文件：",
+            _entry(0, "{count} {name}"),
+            _entry(1, "{name}: {count}"),
+            _entry(2, "{name}（{count} 行）"),
+            _entry(3, "{name} - {count} lines"),
+            _entry(4, "{count:<6}{name}"),
+        ])
+        assert t7.judge(ok_output, tmp_path) is True
+        assert t7.TASK["judge"]["type"] == "custom"
+
+        # 行数错误（数字被错误计数污染）→ 失败
+        name0, _ = top5[0]
+        wrong = ok_output.replace(f"{max(top5[0][1])} {name0}", f"999 {name0}")
+        assert t7.judge(wrong, tmp_path) is False
+
+        # 漏报任一文件 → 失败
+        missing_one = "\n".join(ok_output.splitlines()[:-1])
+        assert t7.judge(missing_one, tmp_path) is False
+
+        # 空输出 → 失败
+        assert t7.judge("", tmp_path) is False
+
     def test_hard_01_judge_rejects_broken_syntax(self, tmp_path):
         """修复验证：hard-01 现在真的 import 验证（docstring 与实现一致）。"""
         from benchmark.tasks.hard import task_01_stack_class as t1
